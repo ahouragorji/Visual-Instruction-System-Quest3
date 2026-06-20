@@ -1,0 +1,29 @@
+ManifestFileVersion: 0
+UnityVersion: 6000.0.38f1
+CRC: 1051735410
+Hashes:
+  AssetFileHash:
+    serializedVersion: 2
+    Hash: b5d9dd196ab58e5ed6bbb07fc0533568
+  TypeTreeHash:
+    serializedVersion: 2
+    Hash: bb8521372c98e74594d3b7eb1b0a7a88
+  IncrementalBuildHash:
+    serializedVersion: 2
+    Hash: 0687940fa00528d6b394997091011311
+HashAppended: 0
+ClassTypes:
+- Class: 48
+  Script: {instanceID: 0}
+SerializeReferenceClassIdentifiers: []
+Assets:
+- Packages/com.meta.xr.sdk.core/Shaders/MetaLit.shader
+- Packages/com.meta.xr.sdk.interaction/Runtime/Shaders/OculusRayVisual.shader
+- Packages/com.meta.xr.sdk.interaction/Runtime/Shaders/Locomotion/TransparentVertexTexture.shader
+- Packages/com.meta.xr.sdk.interaction/Runtime/Shaders/Locomotion/Hotspot.shader
+- Packages/com.meta.xr.sdk.interaction/Runtime/Shaders/Locomotion/TunnelingEffect.shader
+- Packages/com.meta.xr.sdk.core/Editor/BuildingBlocks/BlockData/RoomModel/Shaders/TransparentTexture.shader
+- Packages/com.meta.xr.sdk.interaction/Runtime/Shaders/OculusRayCursor.shader
+- Packages/com.unity.render-pipelines.universal/Shaders/Lit.shader
+- Packages/com.meta.xr.sdk.interaction/Runtime/Shaders/OculusHand.shader
+Dependencies: []

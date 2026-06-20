@@ -1,0 +1,31 @@
+ManifestFileVersion: 0
+UnityVersion: 6000.0.38f1
+CRC: 3228836929
+Hashes:
+  AssetFileHash:
+    serializedVersion: 2
+    Hash: 665ee1f4cb93cfedfdea3db840206659
+  TypeTreeHash:
+    serializedVersion: 2
+    Hash: d028eaa6bf939ea9dfb8244f5ff5cf68
+  IncrementalBuildHash:
+    serializedVersion: 2
+    Hash: 122f78603a7af0caacec80bc295be8fb
+HashAppended: 0
+ClassTypes:
+- Class: 114
+  Script: {fileID: 11500000, guid: 8922a6ca86889d84f8371a29d37b6dc8, type: 3}
+- Class: 114
+  Script: {fileID: 11500000, guid: a7d75bea1662418ab5f9e0c22110bc09, type: 3}
+- Class: 114
+  Script: {fileID: 11500000, guid: 3863570e7e6387a40ae4f323d83291e5, type: 3}
+- Class: 115
+  Script: {instanceID: 0}
+SerializeReferenceClassIdentifiers: []
+Assets:
+- Assets/Resources/OculusRuntimeSettings.asset
+- Assets/Resources/InputActions.asset
+- Assets/Resources/ImmersiveDebuggerSettings.asset
+- Assets/Resources/OVRBuildConfig.asset
+- Assets/Resources/OVRPlatformToolSettings.asset
+Dependencies: []
