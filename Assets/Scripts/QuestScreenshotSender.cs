@@ -45,6 +45,14 @@ public class QuestPassthroughSender : MonoBehaviour
     [Header("Capture State")]
     public Vector3 lastCaptureHeadPosition; // <-- ADD THIS
     
+
+    [Header("Pipeline Settings")]
+    [SerializeField] Toggle useYoloeToggle;        // assign in Inspector
+    [SerializeField] Toggle useDinoToggle;        // assign in Inspector
+
+    [SerializeField] Toggle taskToggle;
+    [SerializeField] Toggle queryToggle;
+
     private WebSocket _ws;
     private RTCPeerConnection _pc;
     private RTCDataChannel _dataChannel;
@@ -119,9 +127,10 @@ public class QuestPassthroughSender : MonoBehaviour
 
         if (triggerJustPressed && isChannelOpen && !_capturing)
         {
+           
             preCommand = commandInputField.text;
 
-            commandInputField.text = "Capturing environment...";
+           commandInputField.text = "Capturing environment...";
             Debug.Log($"[Quest] Trigger pressed. Starting capture.");
             StartCoroutine(CaptureImages());
         }
@@ -132,7 +141,7 @@ public class QuestPassthroughSender : MonoBehaviour
         }
         else if (triggerJustPressed && _capturing)
         {
-            commandInputField.text = "Already asked something, please wait...";
+           commandInputField.text = "Already asked something, please wait...";
             Debug.LogWarning("[Quest] Trigger ignored. A capture is already in progress (_capturing=true).");
         }
     }
@@ -141,7 +150,7 @@ public class QuestPassthroughSender : MonoBehaviour
     // Signaling
     // --------------- ----------------------------------------------------------
 
-    public string passpreCommand()
+    public string PasspreCommand()
     {
         return preCommand;
     }
@@ -423,6 +432,11 @@ private IEnumerator CaptureImages()
         yield break;
     }
 
+        if (queryToggle.isOn)
+        {
+            Debug.Log("query toggle is on");
+        }
+
     // ── 5. BUILD PACKAGE AND SEND ──
     var package = new SnapshotMeta
     {
@@ -445,10 +459,13 @@ private IEnumerator CaptureImages()
         depthHeight = depthTex != null ? depthTex.height : 0,
         depthNearZ = depthNearZ, depthFarZ = depthFarZ,
 
-        command = commandInputField.text,
-
+        command = preCommand,
+        useYoloe  = useYoloeToggle != null && useYoloeToggle.isOn,
+        intent = (taskToggle != null && taskToggle.isOn) ? "task" : "query",
         imageRGB = Convert.ToBase64String(imageJpg),
         imageDepth = depthBase64
+
+        
     };
 
     commandInputField.text = "Asking Alpha, please wait ...";

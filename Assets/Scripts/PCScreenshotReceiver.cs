@@ -8,7 +8,7 @@ using UnityEngine.Networking;
 using Unity.WebRTC;
 using NativeWebSocket;
 
-public class PCScreenshotReceiver : MonoBehaviour
+public class PCScreenShotReceiver : MonoBehaviour
 {
     [Header("Signaling")]
     public string signalingUrl = "ws://127.0.0.1:3000";
@@ -307,6 +307,7 @@ public class PCScreenshotReceiver : MonoBehaviour
 
         if (!string.IsNullOrEmpty(metadata.command))
         {
+            Debug.LogWarning("[DEFAULT COMMAND ]changing default to what user said");
             defaultCommand = metadata.command;
             Debug.Log($"[PC] Command updated to: '{defaultCommand}'");
         }
@@ -322,7 +323,7 @@ public class PCScreenshotReceiver : MonoBehaviour
         catch (Exception e) { Debug.LogError($"[PC] Failed to save metadata JSON for {id}. Error: {e.Message}"); }
 
         if (rgbPath != null && depthPath != null && metaPath != null)
-            StartCoroutine(RequestInstructionsFromServer(id, rgbPath, depthPath, metaPath, defaultCommand));
+            StartCoroutine(RequestInstructionsFromServer(id, rgbPath, depthPath, metaPath, defaultCommand, metadata.useYoloe, metadata.intent ));
         else
             Debug.LogWarning($"[PC] Skipping server request for '{id}': one or more files failed to save.");
     }
@@ -339,6 +340,8 @@ public class PCScreenshotReceiver : MonoBehaviour
         public string depthPath;
         public string metaPath;
         public string command;
+        public bool   useYoloe;   // NEW
+        public string intent; 
     }
 
     // ── Serialization types that match app.py's output schema exactly ────────
@@ -388,7 +391,7 @@ public class PCScreenshotReceiver : MonoBehaviour
     }
 
     private IEnumerator RequestInstructionsFromServer(string id, string rgbPath, string depthPath,
-                                                        string metaPath, string command)
+                                                        string metaPath, string command, bool useYoloe, string intent)
     {
         var body = new ServerRequestBody
         {
@@ -396,7 +399,9 @@ public class PCScreenshotReceiver : MonoBehaviour
             rgbPath   = FormatPathForServer(rgbPath),
             depthPath = FormatPathForServer(depthPath),
             metaPath  = FormatPathForServer(metaPath),
-            command   = command
+            command   = command,
+             useYoloe  = useYoloe,               
+        intent    = intent 
         };
 
         Debug.Log($"[PC] Requesting instructions for '{id}' from: {detectionServerUrl}");

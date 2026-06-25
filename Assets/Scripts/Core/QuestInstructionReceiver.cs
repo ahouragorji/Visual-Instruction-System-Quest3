@@ -40,7 +40,7 @@ public class QuestInstructionReceiver : MonoBehaviour
 
     [Header("Instruction Panel")]
     public TMP_Text instructionText;
-    public TMP_Text commandText;
+    public TMP_InputField commandInputField;
     public TMP_Text stepCounterText;
     public AudioSource audioSource;
     [SerializeField] AudioClip clip;
@@ -53,7 +53,7 @@ public class QuestInstructionReceiver : MonoBehaviour
     public Button debugToggleButton;
     [SerializeField] private Material drawMaterial;
 
-    [SerializeField] QuestPassthroughSender questPassthroughSender;
+
     
     private readonly Dictionary<string, string[]> _chunkBuffers = new Dictionary<string, string[]>();
     private readonly Dictionary<int, List<GameObject>> _overlaysByStep = new Dictionary<int, List<GameObject>>();
@@ -136,7 +136,6 @@ public class QuestInstructionReceiver : MonoBehaviour
         InstructionResponse parsed = null;
 
 
-//        commandText.text = questPassthroughSender.passpreCommand();
         
         try
         {
@@ -269,6 +268,8 @@ public class QuestInstructionReceiver : MonoBehaviour
 
     private void ShowCurrentStepText()
     {
+        commandInputField.text = sender.PasspreCommand();
+
         if (_currentResponse == null) return;
         int activeStep = _currentStepIndex + 1;
         string text = null;
