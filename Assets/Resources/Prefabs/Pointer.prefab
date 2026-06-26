@@ -67,6 +67,7 @@ MonoBehaviour:
   m_EditorClassIdentifier: 
   handTag: PlayerHand
   handLayer: VR_Hands
+  questInstructionReceiver: {fileID: 0}
   destructionParticles: {fileID: 8485301873492874572, guid: 0254a03bc9e0c6e458b1dd857319480c, type: 3}
 --- !u!65 &7306021291647195119
 BoxCollider:

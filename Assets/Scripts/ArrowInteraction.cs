@@ -9,7 +9,6 @@ public class ArrowInteraction : MonoBehaviour
     public string handLayer = "VR_Hands";
 
     [Header("NextStep")]
-    public QuestInstructionReceiver questInstructionReceiver;
 
 
     [Header("Visual Effects")]
@@ -36,7 +35,7 @@ public class ArrowInteraction : MonoBehaviour
         if (_isDestroying) return;
         _isDestroying = true;
 
-        questInstructionReceiver.AdvanceToNextStep();
+        //questInstructionReceiver.AdvanceToNextStep();
         // Turn off the collider so it can't be touched twice
         GetComponent<Collider>().enabled = false;
 

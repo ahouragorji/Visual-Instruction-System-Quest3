@@ -23,12 +23,38 @@ public class PCScreenShotReceiver : MonoBehaviour
     [Tooltip("Local Python server that runs YOLOE/SAM detection and reprojection.")]
     public string detectionServerUrl = "http://127.0.0.1:5000/process";
 
+    [Header("Retry Settings")]
+    [Tooltip("URL for the /retry endpoint on the Python server.")]
+    public string retryServerUrl = "http://127.0.0.1:5000/retry";
+    [Tooltip("How often (seconds) the PC polls /retry after a /process call.")]
+    public float retryIntervalSeconds = 10f;
+
+    [Serializable]
+    private class RetryRequestBody
+    {
+        public string id;
+        public string rgbPath;
+        public string depthPath;
+        public string metaPath;
+    }
+
+    [Serializable]
+    private class RetryResponse
+    {
+        public string      id;
+        public AROverlay[] ar_overlays;
+        public bool        retry_complete;
+    }
+
     [Tooltip("Default task command sent to the vision pipeline. Changeable per-request later if needed.")]
     public string defaultCommand = "Clean your room";
     
     private WebSocket _ws;
     private RTCPeerConnection _pc;
     private RTCDataChannel _remoteDataChannel;
+
+    private string  _lastCaptureId   = null;
+    private Coroutine _retryCoroutine = null;
 
     private readonly Queue<string> _msgQueue = new Queue<string>();
     private Dictionary<string, string[]> _chunkBuffers = new Dictionary<string, string[]>();
@@ -223,9 +249,10 @@ public class PCScreenShotReceiver : MonoBehaviour
         }
     }
 
-    private void OnDataChannelMessage(string message)
+   private void OnDataChannelMessage(string message)
     {
-        if (!message.StartsWith("IMG|")) return;
+        bool isRetry = message.StartsWith("RIMG|");
+        if (!message.StartsWith("IMG|") && !isRetry) return;
 
         string[] parts = message.Split(new char[]{'|'}, 5);
         if (parts.Length < 5)
@@ -239,22 +266,27 @@ public class PCScreenShotReceiver : MonoBehaviour
         int    total   = int.Parse(parts[3]);
         string data    = parts[4];
 
-        if (!_chunkBuffers.ContainsKey(id))
+        // Differentiate buffer keys so regular and retry chunks don't collide
+        string bufferKey = (isRetry ? "R_" : "I_") + id;
+
+        if (!_chunkBuffers.ContainsKey(bufferKey))
         {
-            _chunkBuffers[id] = new string[total];
-            Debug.Log($"[PC] Started receiving capture '{id}': expecting {total} chunks.");
+            _chunkBuffers[bufferKey] = new string[total];
+            Debug.Log($"[PC] Started receiving {(isRetry ? "RETRY capture" : "capture")} '{id}': expecting {total} chunks.");
         }
 
-        _chunkBuffers[id][index] = data;
-        _chunkLastUpdateTime[id] = Time.time;
+        _chunkBuffers[bufferKey][index] = data;
+        _chunkLastUpdateTime[bufferKey] = Time.time;
 
-        if (Array.TrueForAll(_chunkBuffers[id], chunk => chunk != null))
+        if (Array.TrueForAll(_chunkBuffers[bufferKey], chunk => chunk != null))
         {
-            string fullBase64 = string.Concat(_chunkBuffers[id]);
-            _chunkBuffers.Remove(id);
-            _chunkLastUpdateTime.Remove(id);
-            Debug.Log($"[PC] Capture '{id}' complete: all {total} chunks received. Saving...");
-            SaveSnapshotToDisk(id, fullBase64);
+            string fullBase64 = string.Concat(_chunkBuffers[bufferKey]);
+            _chunkBuffers.Remove(bufferKey);
+            _chunkLastUpdateTime.Remove(bufferKey);
+            Debug.Log($"[PC] {(isRetry ? "RETRY capture" : "Capture")} '{id}' complete: all {total} chunks received. Saving...");
+            
+            // Pass the isRetry flag to the save function
+            SaveSnapshotToDisk(id, fullBase64, isRetry);
         }
     }
 
@@ -262,7 +294,8 @@ public class PCScreenShotReceiver : MonoBehaviour
     // Save to disk
     // -------------------------------------------------------------------------
 
-    private void SaveSnapshotToDisk(string id, string base64Envelope)
+    // Add the optional isRetry parameter here
+    private void SaveSnapshotToDisk(string id, string base64Envelope, bool isRetry = false)
     {
         SnapshotMeta metadata = null;
         string rgbPath = null, depthPath = null, metaPath = null;
@@ -305,7 +338,7 @@ public class PCScreenShotReceiver : MonoBehaviour
             catch (Exception e) { Debug.LogError($"[PC] Depth Decode failed for {id}. Error: {e.Message}"); }
         }
 
-        if (!string.IsNullOrEmpty(metadata.command))
+        if (!string.IsNullOrEmpty(metadata.command) && !isRetry)
         {
             Debug.LogWarning("[DEFAULT COMMAND ]changing default to what user said");
             defaultCommand = metadata.command;
@@ -322,10 +355,24 @@ public class PCScreenShotReceiver : MonoBehaviour
         }
         catch (Exception e) { Debug.LogError($"[PC] Failed to save metadata JSON for {id}. Error: {e.Message}"); }
 
+        // =====================================================================
+        // THE FIX: Only call the main /process server route if this is NOT a retry
+        // =====================================================================
         if (rgbPath != null && depthPath != null && metaPath != null)
-            StartCoroutine(RequestInstructionsFromServer(id, rgbPath, depthPath, metaPath, defaultCommand, metadata.useYoloe, metadata.intent ));
+        {
+            if (!isRetry)
+            {
+                StartCoroutine(RequestInstructionsFromServer(id, rgbPath, depthPath, metaPath, defaultCommand, metadata.useYoloe, metadata.intent));
+            }
+            else
+            {
+                Debug.Log($"[PC] Retry capture saved to disk for '{id}'. The background RetryLoop will automatically read these new files on its next tick.");
+            }
+        }
         else
+        {
             Debug.LogWarning($"[PC] Skipping server request for '{id}': one or more files failed to save.");
+        }
     }
 
     // -------------------------------------------------------------------------
@@ -448,9 +495,126 @@ public class PCScreenShotReceiver : MonoBehaviour
 
             Debug.Log($"[PC] Relaying {parsed.ar_overlays.Length} overlays to Quest for '{id}'.");
             RelayInstructionsToQuest(responseJson);
+            _lastCaptureId = id;
+
+           
+        }
+         if (_retryCoroutine != null)
+            {
+                StopCoroutine(_retryCoroutine);
+                _retryCoroutine = null;
+                Debug.Log("[PC] Cancelled previous retry loop — new /process request started.");
+            }
+            _retryCoroutine = StartCoroutine(RetryLoop(id));
+    }
+
+    private IEnumerator RetryLoop(string captureId)
+{
+    Debug.Log($"[PC/Retry] Starting retry loop for '{captureId}' every {retryIntervalSeconds}s.");
+
+    while (true)
+    {
+        yield return new WaitForSeconds(retryIntervalSeconds);
+
+        // The Quest sends a fresh capture for each retry. For now the PC
+        // re-uses the same files from the original /process call — the
+        // server only uses the new image for detection, and the world-space
+        // reprojection still works with the original depth + meta.
+        //
+        // If you later want the Quest to send a brand-new image each interval,
+        // hook into SaveSnapshotToDisk to update _lastRgbPath etc., and
+        // guard here so you only call /retry once a new image has arrived.
+        if (_lastCaptureId != captureId) yield break;  // superseded by a newer /process
+
+        string rgbPath   = Path.Combine(saveFolder, $"RGB_{captureId}.jpg");
+        string depthPath = Path.Combine(saveFolder, $"Depth_{captureId}.bin");
+        string metaPath  = Path.Combine(saveFolder, $"Meta_{captureId}.json");
+
+        var body = new RetryRequestBody
+        {
+            id        = captureId,
+            rgbPath   = FormatPathForServer(rgbPath),
+            depthPath = FormatPathForServer(depthPath),
+            metaPath  = FormatPathForServer(metaPath),
+        };
+
+        using (var req = new UnityWebRequest(retryServerUrl, "POST"))
+        {
+            byte[] payload = Encoding.UTF8.GetBytes(JsonUtility.ToJson(body));
+            req.uploadHandler   = new UploadHandlerRaw(payload);
+            req.downloadHandler = new DownloadHandlerBuffer();
+            req.SetRequestHeader("Content-Type", "application/json");
+            req.timeout = 30;
+
+            yield return req.SendWebRequest();
+
+            if (req.result != UnityWebRequest.Result.Success)
+            {
+                Debug.LogWarning($"[PC/Retry] Request failed for '{captureId}': {req.error}");
+                continue;  // try again next interval
+            }
+
+            string responseJson = req.downloadHandler.text;
+            RetryResponse parsed = null;
+            try { parsed = JsonUtility.FromJson<RetryResponse>(responseJson); }
+            catch (Exception e)
+            {
+                Debug.LogError($"[PC/Retry] Failed to parse retry response: {e.Message}");
+                continue;
+            }
+
+            if (parsed == null) continue;
+
+            if (parsed.retry_complete)
+            {
+                Debug.Log($"[PC/Retry] All objects found for '{captureId}'. Stopping retry loop.");
+                yield break;
+            }
+
+            if (parsed.ar_overlays != null && parsed.ar_overlays.Length > 0)
+            {
+                Debug.Log($"[PC/Retry] {parsed.ar_overlays.Length} new overlay(s) for '{captureId}'. Relaying as RETRY.");
+                RelayRetryToQuest(responseJson);
+            }
+            else
+            {
+                Debug.Log($"[PC/Retry] Nothing new yet for '{captureId}'.");
+            }
+        }
+    }
+}
+
+
+private void RelayRetryToQuest(string retryJson)
+{
+    if (_remoteDataChannel == null || _remoteDataChannel.ReadyState != RTCDataChannelState.Open)
+    {
+        Debug.LogError("[PC/Retry] Cannot relay: DataChannel is not open.");
+        return;
+    }
+
+    const int CHUNK_SIZE = 12000;
+    byte[] utf8   = Encoding.UTF8.GetBytes(retryJson);
+    string base64 = Convert.ToBase64String(utf8);
+    int    total  = Mathf.CeilToInt((float)base64.Length / CHUNK_SIZE);
+    string relayId = DateTime.UtcNow.ToString("yyyyMMdd_HHmmss");
+
+    for (int i = 0; i < total; i++)
+    {
+        int    start  = i * CHUNK_SIZE;
+        int    length = Mathf.Min(CHUNK_SIZE, base64.Length - start);
+        string msg    = $"RETRY|{relayId}|{i}|{total}|{base64.Substring(start, length)}";
+
+        try { _remoteDataChannel.Send(msg); }
+        catch (Exception e)
+        {
+            Debug.LogError($"[PC/Retry] Failed to relay chunk {i}/{total}: {e.Message}");
+            return;
         }
     }
 
+    Debug.Log($"[PC/Retry] Relayed to Quest ({total} chunks).");
+}
     private void RelayInstructionsToQuest(string instructionJson)
     {
         if (_remoteDataChannel == null || _remoteDataChannel.ReadyState != RTCDataChannelState.Open)

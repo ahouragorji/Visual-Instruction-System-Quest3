@@ -61,7 +61,7 @@ public class QuestSpeechController : MonoBehaviour
         }
     }
 
-    private void StartRecording()
+    public void StartRecording()
     {
         _isRecording = true;
 
@@ -74,7 +74,7 @@ public class QuestSpeechController : MonoBehaviour
         speechToTextAgent.StartListening();
     }
 
-    private void StopRecording()
+    public void StopRecording()
     {
         _isRecording = false;
 

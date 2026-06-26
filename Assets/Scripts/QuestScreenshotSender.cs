@@ -12,6 +12,7 @@ using Unity.Collections;
 using System.Reflection;
 using UnityEngine.UI;
 using TMPro;
+using System.Text.RegularExpressions;
 
 public class QuestPassthroughSender : MonoBehaviour
 {
@@ -28,8 +29,14 @@ public class QuestPassthroughSender : MonoBehaviour
     
     [SerializeField] OVRCameraRig rig;
 
-   
+    [Header("References")]
+    [SerializeField] QuestInstructionReceiver instructionReceiver;
 
+
+    [Header("Retry Settings")]
+    [SerializeField] float retryIntervalSeconds = 10f;
+
+    private Coroutine _retryLoopCoroutine = null;
 
     [Header("Command Input Field")]
     [SerializeField] TMP_InputField commandInputField;
@@ -44,14 +51,16 @@ public class QuestPassthroughSender : MonoBehaviour
 
     [Header("Capture State")]
     public Vector3 lastCaptureHeadPosition; // <-- ADD THIS
-    
-
+    private string _lastCaptureId = null;
+    public bool triggerJustPressed= false;
     [Header("Pipeline Settings")]
     [SerializeField] Toggle useYoloeToggle;        // assign in Inspector
     [SerializeField] Toggle useDinoToggle;        // assign in Inspector
 
     [SerializeField] Toggle taskToggle;
     [SerializeField] Toggle queryToggle;
+
+    [SerializeField] AudioSource CaptureClip;
 
     private WebSocket _ws;
     private RTCPeerConnection _pc;
@@ -76,20 +85,32 @@ public class QuestPassthroughSender : MonoBehaviour
     public event Action<string> OnAppMessageReceived;
     private const int CHUNK_SIZE = 12000;
     private readonly Queue<string> _msgQueue = new Queue<string>();
-
+    private bool _hasRemoteDescription = false;
+    private List<SignalingMessage> _pendingIceCandidates = new List<SignalingMessage>();
     // -------------------------------------------------------------------------
     // Lifecycle
     // -------------------------------------------------------------------------
 
-    private void Start()
+   private void Start()
     {
-        // CRITICAL BUG FIX: Initialize WebRTC before doing anything else
-  
         StartCoroutine(WebRTC.Update());
         ConnectSignaling();
     }
 
+    private void OnEnable()
+    {
+        if (instructionReceiver != null)
+            instructionReceiver.OnRetryComplete += StopRetryLoop;
+    }
 
+    private void OnDisable()
+    {
+        if (instructionReceiver != null)
+            instructionReceiver.OnRetryComplete -= StopRetryLoop;
+    }
+    
+
+    
     private async void ConnectSignaling()
     {
         _ws = new WebSocket(signalingUrl);
@@ -108,6 +129,31 @@ public class QuestPassthroughSender : MonoBehaviour
         await _ws.Connect();
     }
 
+    public void ToggleTrigger()
+    {
+        CaptureClip.Play();
+
+        StartCoroutine(ToggleDelayed());
+    }
+
+    private IEnumerator ToggleDelayed()
+    {
+        yield return new WaitForSeconds(2f);
+        triggerJustPressed = true;
+    }
+
+
+    private void StopRetryLoop()
+        {
+            if (_retryLoopCoroutine != null)
+            {
+                StopCoroutine(_retryLoopCoroutine);
+                _retryLoopCoroutine = null;
+                Debug.Log("[Quest] Retry loop stopped.");
+            }
+        }
+
+
   private void Update()
     {
         _ws?.DispatchMessageQueue();
@@ -121,26 +167,56 @@ public class QuestPassthroughSender : MonoBehaviour
 
         // Use Button.One for the 'A' button, or Button.PrimaryHandTrigger for the Grip.
         // Button.Start is the Left Menu button.
-        bool triggerJustPressed = OVRInput.GetDown(OVRInput.Button.One); 
+        if(OVRInput.GetDown(OVRInput.Button.One)) triggerJustPressed = true;
 
         bool isChannelOpen = _dataChannel != null && _dataChannel.ReadyState == RTCDataChannelState.Open;
 
-        if (triggerJustPressed && isChannelOpen && !_capturing)
+        bool sessionActive = instructionReceiver != null && instructionReceiver.IsSessionActive;
+
+
+        if (triggerJustPressed && isChannelOpen && !_capturing && !sessionActive)
         {
            
             preCommand = commandInputField.text;
 
            commandInputField.text = "Capturing environment...";
             Debug.Log($"[Quest] Trigger pressed. Starting capture.");
+            triggerJustPressed = false;
             StartCoroutine(CaptureImages());
         }
+
+        else if (triggerJustPressed && sessionActive)
+        {
+            triggerJustPressed = false;
+            commandInputField.text = "Finish current steps first.";
+            Debug.LogWarning("[Quest] Trigger ignored — instruction session still active.");
+        }
+        bool retryPressed = OVRInput.GetDown(OVRInput.Button.Three);
+
+        if (retryPressed && isChannelOpen && !_capturing)
+        {
+            Debug.Log($"[Quest] Retry pressed. Starting capture.");
+            if (string.IsNullOrEmpty(_lastCaptureId))
+            {
+                Debug.LogWarning("[Quest] Cannot retry: No previous capture ID found. Take a normal capture first.");
+                commandInputField.text = "Take a normal capture first!";
+            }
+            else
+            {
+                Debug.Log($"[Quest] Retry pressed. Starting background capture for '{_lastCaptureId}'.");
+                StartCoroutine(CaptureRetryImage(_lastCaptureId));
+            }
+        }
+
         else if (triggerJustPressed && !isChannelOpen)
         {
             string stateMsg = _dataChannel != null ? _dataChannel.ReadyState.ToString() : "Null";
+            triggerJustPressed = false;
             Debug.LogWarning($"[Quest] Trigger ignored. DataChannel state is: {stateMsg}. Wait for connection.");
         }
         else if (triggerJustPressed && _capturing)
         {
+            triggerJustPressed  =false;
            commandInputField.text = "Already asked something, please wait...";
             Debug.LogWarning("[Quest] Trigger ignored. A capture is already in progress (_capturing=true).");
         }
@@ -154,7 +230,7 @@ public class QuestPassthroughSender : MonoBehaviour
     {
         return preCommand;
     }
-    private void HandleSignalingMessage(string raw)
+   private void HandleSignalingMessage(string raw)
     {
         if (raw.StartsWith("DC|"))
         {
@@ -177,9 +253,20 @@ public class QuestPassthroughSender : MonoBehaviour
                 break;
             case "ice":
                 if (!string.IsNullOrEmpty(msg.candidate))
-                    StartCoroutine(AddIceCandidate(msg.candidate, msg.sdpMid, msg.sdpMLineIndex));
+                {
+                    // FIX: Queue candidates if remote description isn't set yet
+                    if (!_hasRemoteDescription) 
+                    {
+                        _pendingIceCandidates.Add(msg);
+                    }
+                    else 
+                    {
+                        StartCoroutine(AddIceCandidate(msg.candidate, msg.sdpMid, msg.sdpMLineIndex));
+                    }
+                }
                 break;
         }
+
     }
 
     // -------------------------------------------------------------------------
@@ -188,6 +275,18 @@ public class QuestPassthroughSender : MonoBehaviour
 
     private IEnumerator CreateOffer()
     {
+
+        if (_pc != null)
+        {
+            Debug.Log("[Quest] Cleaning up old peer connection before creating new offer.");
+            _dataChannel?.Close();
+            _dataChannel?.Dispose();
+            _dataChannel = null;
+            _pc.Close();
+            _pc.Dispose();
+            _pc = null;
+        }
+
         var config = new RTCConfiguration
         {
             iceServers = new[] { new RTCIceServer { urls = new[] { "stun:stun.l.google.com:19302" } } }
@@ -227,7 +326,22 @@ public class QuestPassthroughSender : MonoBehaviour
     private IEnumerator SetRemoteDescription(string sdp, RTCSdpType sdpType)
     {
         var desc = new RTCSessionDescription { type = sdpType, sdp = sdp };
-        yield return _pc.SetRemoteDescription(ref desc);
+        var op = _pc.SetRemoteDescription(ref desc);
+        yield return op;
+
+        if (op.IsError)
+        {
+            Debug.LogError($"[Quest] SetRemoteDescription Error: {op.Error.message}");
+            yield break;
+        }
+
+        // FIX: Mark as ready and flush the queue
+        _hasRemoteDescription = true;
+        foreach (var c in _pendingIceCandidates)
+        {
+            StartCoroutine(AddIceCandidate(c.candidate, c.sdpMid, c.sdpMLineIndex));
+        }
+        _pendingIceCandidates.Clear();
     }
 
     private IEnumerator AddIceCandidate(string candidate, string sdpMid, int sdpMLineIndex)
@@ -256,6 +370,17 @@ public class QuestPassthroughSender : MonoBehaviour
         _capturing        = false;
         _triggerWasDown   = false;
 
+        _hasRemoteDescription = false;
+        _pendingIceCandidates.Clear();
+
+        _dataChannel?.Close();
+        _dataChannel?.Dispose();
+        _dataChannel = null;
+
+        _pc?.Close();
+        _pc?.Dispose();
+        _pc = null;
+
         _dataChannel?.Close();
         _pc?.Close();
         if (_ws != null && _ws.State != NativeWebSocket.WebSocketState.Closed)
@@ -277,7 +402,7 @@ private IEnumerator CaptureImages()
 {
     _capturing = true;
     string timestamp = DateTime.UtcNow.ToString("yyyyMMdd_HHmmss");
-
+    _lastCaptureId = timestamp;
     // ── 1. EXTRACT DEPTH IMMEDIATELY (While the global texture is still alive) ──
     float depth_fx = 0, depth_fy = 0, depth_cx = 0, depth_cy = 0;
     float depthNearZ = 0.1f, depthFarZ = 20.0f;
@@ -492,8 +617,241 @@ private IEnumerator CaptureImages()
     }
 
     Debug.Log($"[Quest] Capture {timestamp} fully sent ({total} chunks).");
+    // Cancel any previous loop in case user fired a second capture
+    StopRetryLoop();
+
+    if (!string.IsNullOrEmpty(_lastCaptureId))
+    {
+        _retryLoopCoroutine = StartCoroutine(AutoRetryLoop(_lastCaptureId));
+        Debug.Log($"[Quest] Auto-retry loop started for '{_lastCaptureId}' every {retryIntervalSeconds}s.");
+    }
     _capturing = false;
 }
+
+private IEnumerator AutoRetryLoop(string captureId)
+{
+    while (true)
+    {
+        yield return new WaitForSeconds(retryIntervalSeconds);
+
+        // Stop if a newer capture has superseded this one
+        if (_lastCaptureId != captureId)
+        {
+            Debug.Log($"[Quest] Retry loop for '{captureId}' superseded by newer capture. Stopping.");
+            yield break;
+        }
+
+        // Stop if still mid-capture (e.g. user triggered a manual retry at the same time)
+        if (_capturing)
+        {
+            Debug.Log("[Quest] Retry skipped — capture already in progress.");
+            continue;
+        }
+
+        bool isChannelOpen = _dataChannel != null && _dataChannel.ReadyState == RTCDataChannelState.Open;
+        if (!isChannelOpen)
+        {
+            Debug.LogWarning("[Quest] Retry skipped — data channel not open.");
+            continue;
+        }
+
+        Debug.Log($"[Quest] Auto-retry firing for '{captureId}'.");
+        yield return StartCoroutine(CaptureRetryImage(captureId));
+        // Loop continues — the coroutine will be stopped externally by
+        // StopRetryLoop() when OnRetryComplete fires from the receiver.
+    }
+}
+    
+    
+    /// <summary>
+    /// Captures a fresh RGB and Depth frame specifically for the retry loop.
+    /// Runs silently in the background and uses the existing captureId.
+    /// </summary>
+    public IEnumerator CaptureRetryImage(string originalCaptureId)
+    {
+        // Prevent overlapping captures
+        if (_capturing) yield break;
+        _capturing = true;
+
+        Debug.Log($"[Quest] Taking background retry capture for '{originalCaptureId}'...");
+
+        // ── 1. EXTRACT DEPTH IMMEDIATELY ──
+        float depth_fx = 0, depth_fy = 0, depth_cx = 0, depth_cy = 0;
+        float depthNearZ = 0.1f, depthFarZ = 20.0f;
+        Vector3 depthPos = Vector3.zero;
+        Quaternion depthRot = Quaternion.identity;
+        Texture depthTex = Shader.GetGlobalTexture("_PreprocessedEnvironmentDepthTexture");
+
+        try
+        {
+            FieldInfo frameDescField = typeof(EnvironmentDepthManager).GetField("frameDescriptors", BindingFlags.NonPublic | BindingFlags.Instance);
+            if (frameDescField != null)
+            {
+                Array descriptorsArray = (Array)frameDescField.GetValue(environmentDepthManager);
+                if (descriptorsArray != null && descriptorsArray.Length > 0)
+                {
+                    object frameDesc = descriptorsArray.GetValue(0);
+                    Type descType = frameDesc.GetType();
+
+                    depthPos = (Vector3)descType.GetField("createPoseLocation", BindingFlags.NonPublic | BindingFlags.Instance).GetValue(frameDesc);
+                    depthRot = (Quaternion)descType.GetField("createPoseRotation", BindingFlags.NonPublic | BindingFlags.Instance).GetValue(frameDesc);
+
+                    float fovLeft  = (float)descType.GetField("fovLeftAngleTangent",  BindingFlags.NonPublic | BindingFlags.Instance).GetValue(frameDesc);
+                    float fovRight = (float)descType.GetField("fovRightAngleTangent", BindingFlags.NonPublic | BindingFlags.Instance).GetValue(frameDesc);
+                    float fovTop   = (float)descType.GetField("fovTopAngleTangent",   BindingFlags.NonPublic | BindingFlags.Instance).GetValue(frameDesc);
+                    float fovDown  = (float)descType.GetField("fovDownAngleTangent",  BindingFlags.NonPublic | BindingFlags.Instance).GetValue(frameDesc);
+
+                    depthNearZ  = (float)descType.GetField("nearZ",  BindingFlags.NonPublic | BindingFlags.Instance).GetValue(frameDesc);
+                    depthFarZ   = (float)descType.GetField("farZ",   BindingFlags.NonPublic | BindingFlags.Instance).GetValue(frameDesc);
+                    
+                    if (depthTex != null)
+                    {
+                        depth_fx = depthTex.width / (fovLeft + fovRight);
+                        depth_fy = depthTex.height / (fovTop + fovDown);
+                        depth_cx = depth_fx * fovLeft;
+                        depth_cy = depth_fy * fovTop;
+                    }
+                }
+            }
+        }
+        catch (Exception e) { Debug.LogError($"[Quest/Retry] Reflection failed: {e.Message}"); }
+
+        Transform tSpace = rig != null ? rig.trackingSpace : null;
+
+        RenderTexture cleanDepthRt = null;
+        if (depthTex != null && depthToFloatMaterial != null)
+        {
+            depthToFloatMaterial.SetFloat("_DepthNear", depthNearZ);
+            depthToFloatMaterial.SetFloat("_DepthFar", depthFarZ);
+            
+            cleanDepthRt = RenderTexture.GetTemporary(depthTex.width, depthTex.height, 0, RenderTextureFormat.RFloat);
+            Graphics.Blit(depthTex, cleanDepthRt, depthToFloatMaterial);
+        }
+
+        // ── 2. WAIT FOR END OF FRAME ──
+        yield return new WaitForEndOfFrame();
+
+        // ── 3. LOCK IN CAMERA POSES AND RGB ──
+        Texture camTex = cameraAccess.GetTexture();
+        Pose cameraPose = cameraAccess.GetCameraPose();
+        PassthroughCameraAccess.CameraIntrinsics intrinsics = cameraAccess.Intrinsics;
+
+        if (tSpace != null)
+        {
+            Vector3 worldRgbPos = tSpace.TransformPoint(cameraPose.position);
+            Quaternion worldRgbRot = tSpace.rotation * cameraPose.rotation;
+            cameraPose = new Pose(worldRgbPos, worldRgbRot);
+
+            depthPos = tSpace.TransformPoint(depthPos);
+            depthRot = tSpace.rotation * depthRot;
+        }
+
+        RenderTexture cleanRgbRt = null;
+        if (camTex != null)
+        {
+            cleanRgbRt = RenderTexture.GetTemporary(camTex.width, camTex.height, 0, RenderTextureFormat.ARGB32);
+            Graphics.Blit(camTex, cleanRgbRt);
+        }
+
+        // ── 4. RUN GPU READBACKS SIMULTANEOUSLY ──
+        string depthBase64 = "";
+        if (cleanDepthRt != null)
+        {
+            var depthReq = AsyncGPUReadback.Request(cleanDepthRt, 0, TextureFormat.RFloat);
+            yield return new WaitUntil(() => depthReq.done);
+            if (!depthReq.hasError)
+            {
+                NativeArray<byte> rawDepthBytes = depthReq.GetData<byte>();
+                depthBase64 = Convert.ToBase64String(rawDepthBytes.ToArray());
+            }
+            RenderTexture.ReleaseTemporary(cleanDepthRt);
+        }
+
+        byte[] imageJpg = new byte[0];
+        if (cleanRgbRt != null)
+        {
+            var rgbReq = AsyncGPUReadback.Request(cleanRgbRt, 0, TextureFormat.RGBA32);
+            yield return new WaitUntil(() => rgbReq.done);
+            if (!rgbReq.hasError)
+            {
+                NativeArray<byte> rawRgbBytes = rgbReq.GetData<byte>();
+                int expectedBytes = cleanRgbRt.width * cleanRgbRt.height * 4;
+                if (rawRgbBytes.Length == expectedBytes)
+                {
+                    Texture2D snap = new Texture2D(cleanRgbRt.width, cleanRgbRt.height, TextureFormat.RGBA32, false);
+                    snap.LoadRawTextureData(rawRgbBytes.ToArray());
+                    snap.Apply();
+                    imageJpg = snap.EncodeToJPG(60);
+                    Destroy(snap);
+                }
+            }
+            RenderTexture.ReleaseTemporary(cleanRgbRt);
+        }
+
+        if (imageJpg.Length == 0)
+        {
+            Debug.LogError("[Quest/Retry] Failed to encode RGB image. Aborting retry.");
+            _capturing = false;
+            yield break;
+        }
+
+        // ── 5. BUILD PACKAGE AND SEND ──
+        var package = new SnapshotMeta
+        {
+            timestamp = originalCaptureId, // Keep the original ID to map to the server's retry session
+            fileName = $"Retry_{originalCaptureId}.jpg",
+            cameraIndex = 0,
+
+            posX = cameraPose.position.x, posY = cameraPose.position.y, posZ = cameraPose.position.z,
+            rotX = cameraPose.rotation.x, rotY = cameraPose.rotation.y, rotZ = cameraPose.rotation.z, rotW = cameraPose.rotation.w,
+
+            imageWidth = cameraAccess.CurrentResolution.x, imageHeight = cameraAccess.CurrentResolution.y,
+            fx = intrinsics.FocalLength.x, fy = intrinsics.FocalLength.y, cx = intrinsics.PrincipalPoint.x, cy = cameraAccess.CurrentResolution.y - intrinsics.PrincipalPoint.y,
+            distortionParams = new float[0],
+
+            depth_posX = depthPos.x, depth_posY = depthPos.y, depth_posZ = depthPos.z,
+            depth_rotX = depthRot.x, depth_rotY = depthRot.y, depth_rotZ = depthRot.z, depth_rotW = depthRot.w,
+
+            depth_fx = depth_fx, depth_fy = depth_fy, depth_cx = depth_cx, depth_cy = depth_cy,
+            depthWidth = depthTex != null ? depthTex.width : 0,
+            depthHeight = depthTex != null ? depthTex.height : 0,
+            depthNearZ = depthNearZ, depthFarZ = depthFarZ,
+
+            command = "Background Retry",
+            useYoloe  = useYoloeToggle != null && useYoloeToggle.isOn,
+            intent = "retry", // Distinct intent tag
+            imageRGB = Convert.ToBase64String(imageJpg),
+            imageDepth = depthBase64
+        };
+
+        string json = JsonUtility.ToJson(package);
+        byte[] utf8 = System.Text.Encoding.UTF8.GetBytes(json);
+        string base64 = Convert.ToBase64String(utf8);
+
+        int total = Mathf.CeilToInt((float)base64.Length / CHUNK_SIZE);
+        
+        for (int i = 0; i < total; i++)
+        {
+            if (_dataChannel == null || _dataChannel.ReadyState != RTCDataChannelState.Open) {
+                _capturing = false; yield break;
+            }
+            while (_dataChannel.BufferedAmount > 65536) yield return null;
+
+            int start = i * CHUNK_SIZE;
+            int length = Mathf.Min(CHUNK_SIZE, base64.Length - start);
+            
+            // Notice the "RIMG|" prefix instead of "IMG|"
+            string msg = $"RIMG|{originalCaptureId}|{i}|{total}|{base64.Substring(start, length)}";
+
+            try { _dataChannel.Send(msg); }
+            catch (Exception e) { _capturing = false; yield break; }
+            yield return null;
+        }
+
+        Debug.Log($"[Quest] Retry capture {originalCaptureId} fully sent ({total} chunks).");
+        _capturing = false;
+    }
+    
     [Serializable]
     private class SignalingMessage
     {

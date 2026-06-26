@@ -54,7 +54,9 @@ public class QuestInstructionReceiver : MonoBehaviour
     [SerializeField] private Material drawMaterial;
 
 
-    
+    public bool IsSessionActive { get; private set; } = false;
+    public event Action OnRetryComplete;
+
     private readonly Dictionary<string, string[]> _chunkBuffers = new Dictionary<string, string[]>();
     private readonly Dictionary<int, List<GameObject>> _overlaysByStep = new Dictionary<int, List<GameObject>>();
     private readonly Dictionary<int, List<GameObject>> _bboxEdgesByStep = new Dictionary<int, List<GameObject>>();
@@ -91,7 +93,7 @@ public class QuestInstructionReceiver : MonoBehaviour
         // _parsers.Add("timer_clock", new TimerClockParser(...));
     }
 
-    private void OnEnable()
+   private void OnEnable()
     {
         if (sender != null) sender.OnAppMessageReceived += HandleAppMessage;
         if (nextButton != null) nextButton.onClick.AddListener(AdvanceToNextStep);
@@ -107,35 +109,53 @@ public class QuestInstructionReceiver : MonoBehaviour
         if (debugToggleButton != null) debugToggleButton.onClick.RemoveListener(ToggleDebugBoundingBoxes);
     }
 
+
+    private void HandleChunkedMessage(string message, bool isMerge)
+{
+    string[] parts = message.Split(new char[] { '|' }, 5);
+    if (parts.Length < 5) return;
+
+    string id    = parts[1];
+    int    index = int.Parse(parts[2]);
+    int    total = int.Parse(parts[3]);
+    string data  = parts[4];
+
+    // Use a namespaced key so INSTR and RETRY chunks don't collide
+    string bufferKey = $"{(isMerge ? "R" : "I")}_{id}";
+
+    if (!_chunkBuffers.ContainsKey(bufferKey))
+        _chunkBuffers[bufferKey] = new string[total];
+
+    _chunkBuffers[bufferKey][index] = data;
+
+    if (Array.TrueForAll(_chunkBuffers[bufferKey], c => c != null))
+    {
+        string fullBase64 = string.Concat(_chunkBuffers[bufferKey]);
+        _chunkBuffers.Remove(bufferKey);
+        DecodeAndApply(fullBase64, isMerge);
+    }
+}
+
     private void HandleAppMessage(string message)
     {
-        if (!message.StartsWith("INSTR|")) return;
-
-        string[] parts = message.Split(new char[] { '|' }, 5);
-        if (parts.Length < 5) return;
-
-        string id = parts[1];
-        int index = int.Parse(parts[2]);
-        int total = int.Parse(parts[3]);
-        string data = parts[4];
-
-        if (!_chunkBuffers.ContainsKey(id)) _chunkBuffers[id] = new string[total];
-        _chunkBuffers[id][index] = data;
-
-        if (Array.TrueForAll(_chunkBuffers[id], c => c != null))
-        {
-            string fullBase64 = string.Concat(_chunkBuffers[id]);
-            _chunkBuffers.Remove(id);
-            DecodeAndApply(fullBase64);
-        }
+        if (message.StartsWith("INSTR|"))
+    {
+        HandleChunkedMessage(message, isMerge: false);
+    }
+    else if (message.StartsWith("RETRY|"))
+    {
+        HandleChunkedMessage(message, isMerge: true);
+        Debug.Log("[Quest] Received retry package");
+    }
+        
     }
 
-    private void DecodeAndApply(string base64Json)
+    private void DecodeAndApply(string base64Json, bool isMerge = false)
     {
         string json = null;
         InstructionResponse parsed = null;
 
-
+     
         
         try
         {
@@ -153,6 +173,21 @@ public class QuestInstructionReceiver : MonoBehaviour
         if (parsed == null || parsed.ar_overlays == null || parsed.ar_overlays.Length == 0)
         {
             Debug.LogWarning("[QIR:Decode] Empty or invalid payload.");
+            return;
+        }
+         if (isMerge)
+        {
+            if (parsed.ar_overlays != null && parsed.ar_overlays.Length > 0)
+            {
+                MergeOverlays(parsed.ar_overlays);
+                RefreshVisibility();
+            }
+
+            if (parsed.retry_complete)
+            {
+                Debug.Log("[QIR] Retry complete — all objects found.");
+                OnRetryComplete?.Invoke();
+            }
             return;
         }
 
@@ -173,7 +208,53 @@ public class QuestInstructionReceiver : MonoBehaviour
         SpawnAllOverlays();
         RefreshVisibility();
         ShowCurrentStepText();
+
+        IsSessionActive = true;
+        Debug.Log("[QIR] Session started — new captures blocked.");
     }
+
+    private void MergeOverlays(AROverlay[] newOverlays)
+{
+    foreach (var overlay in newOverlays)
+    {
+        int stepNum = overlay.step;
+
+        if (!_overlaysByStep.ContainsKey(stepNum))  _overlaysByStep[stepNum]  = new List<GameObject>();
+        if (!_bboxEdgesByStep.ContainsKey(stepNum)) _bboxEdgesByStep[stepNum] = new List<GameObject>();
+
+        if (string.IsNullOrEmpty(overlay.guidance_tool) || string.IsNullOrEmpty(overlay.manipulation_tag))
+            continue;
+
+        if (_parsers.TryGetValue(overlay.guidance_tool, out IToolParser parser))
+        {
+            Vector3 headPos = sender != null ? sender.lastCaptureHeadPosition : Camera.main.transform.position;
+            ParsedSpawnData spawnData = parser.Parse(overlay, headPos);
+
+            if (spawnData.PrefabToSpawn != null)
+            {
+                GameObject spawnedObj = Instantiate(spawnData.PrefabToSpawn, spawnData.Position, spawnData.Rotation);
+                spawnedObj.transform.localScale = spawnData.PrefabToSpawn.transform.localScale * objectScale;
+                spawnedObj.name = $"{overlay.guidance_tool}_Step{stepNum}_{overlay.manipulation_tag}";
+
+                // Visibility matches whatever the current step state is
+                spawnedObj.SetActive(stepNum == _currentStepIndex + 1);
+                _overlaysByStep[stepNum].Add(spawnedObj);
+
+                if (overlay.bboxCorners != null && overlay.bboxCorners.Length == 8)
+                {
+                    List<GameObject> edges = SpawnBoundingBoxEdges(spawnedObj, overlay.bboxCorners);
+                    _bboxEdgesByStep[stepNum].AddRange(edges);
+                }
+            }
+        }
+        else
+        {
+            Debug.LogWarning($"[QIR:Merge] Unrecognized guidance tool: {overlay.guidance_tool}");
+        }
+    }
+
+    Debug.Log($"[QIR:Merge] Merged {newOverlays.Length} overlay(s) into existing session.");
+}
 
     private void SpawnAllOverlays()
     {
@@ -284,15 +365,40 @@ public class QuestInstructionReceiver : MonoBehaviour
         }
 
     }
+ public void AbandonSession()
+    {
+        IsSessionActive = false;
+        ClearAllSpawnedObjects();
+        _currentResponse = null;
+        _currentStepIndex = 0;
+        _maxStep = 0;
+        
+        // THE FIX: Kill the retry loop when user abandons
+        OnRetryComplete?.Invoke(); 
+        
+        Debug.Log("[QIR] Session abandoned — new captures allowed.");
+    }
 
     public void AdvanceToNextStep()
     {
-        if (_currentResponse == null || _currentStepIndex >= _maxStep - 1) return;
+        if (_currentResponse == null || _currentStepIndex >= _maxStep - 1)
+        {
+            // Already on the last step — pressing Next means they're done.
+            if (_currentResponse != null && _currentStepIndex >= _maxStep - 1)
+            {
+                IsSessionActive = false;
+                
+                // THE FIX: Kill the retry loop when user finishes the task
+                OnRetryComplete?.Invoke(); 
+                
+                Debug.Log("[QIR] Session complete — new captures allowed.");
+            }
+            return;
+        }
         _currentStepIndex++;
         RefreshVisibility();
         ShowCurrentStepText();
     }
-
     public void ReturnToPreviousStep()
     {
         if (_currentResponse == null || _currentStepIndex <= 0) return;
@@ -381,5 +487,6 @@ public class QuestInstructionReceiver : MonoBehaviour
     {
         public string id;
         public AROverlay[] ar_overlays;
+        public bool        retry_complete;
     }
 }
