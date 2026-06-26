@@ -28,6 +28,7 @@ public class PCScreenShotReceiver : MonoBehaviour
     public string retryServerUrl = "http://127.0.0.1:5000/retry";
     [Tooltip("How often (seconds) the PC polls /retry after a /process call.")]
     public float retryIntervalSeconds = 10f;
+    
 
     [Serializable]
     private class RetryRequestBody
@@ -54,8 +55,9 @@ public class PCScreenShotReceiver : MonoBehaviour
     private RTCDataChannel _remoteDataChannel;
 
     private string  _lastCaptureId   = null;
-    private Coroutine _retryCoroutine = null;
-
+    private bool _hasRemoteDescription = false;
+    private List<SignalingMessage> _pendingIceCandidates = new List<SignalingMessage>();
+    
     private readonly Queue<string> _msgQueue = new Queue<string>();
     private Dictionary<string, string[]> _chunkBuffers = new Dictionary<string, string[]>();
 
@@ -147,14 +149,25 @@ public class PCScreenShotReceiver : MonoBehaviour
     // -------------------------------------------------------------------------
     // WebRTC handshake
     // -------------------------------------------------------------------------
-
-    private IEnumerator HandleOffer(string sdpOffer)
-    {
+private IEnumerator HandleOffer(string sdpOffer)
+{
+            if (_pc != null)
+        {
+            Debug.Log("[PC] Cleaning up old peer connection before handling new offer.");
+            _remoteDataChannel?.Close();
+            _remoteDataChannel?.Dispose();
+            _remoteDataChannel = null;
+            _pc.Close();
+            _pc.Dispose();
+            _pc = null;
+        }
         var config = new RTCConfiguration
         {
             iceServers = new[] { new RTCIceServer { urls = new[] { "stun:stun.l.google.com:19302" } } }
         };
         _pc = new RTCPeerConnection(ref config);
+
+
 
         _pc.OnDataChannel = channel => {
             Debug.Log("[PC] DataChannel received from Quest.");
@@ -174,7 +187,23 @@ public class PCScreenShotReceiver : MonoBehaviour
         };
 
         var remoteDesc = new RTCSessionDescription { type = RTCSdpType.Offer, sdp = sdpOffer };
-        yield return _pc.SetRemoteDescription(ref remoteDesc);
+        var setRemoteOp = _pc.SetRemoteDescription(ref remoteDesc);
+        yield return setRemoteOp;
+        
+        if (setRemoteOp.IsError) {
+            Debug.LogError($"[PC] SetRemoteDescription Error: {setRemoteOp.Error.message}");
+            yield break;
+        }
+
+        // =====================================================================
+        // THE FIX: Mark as ready and flush the queued ICE candidates
+        // =====================================================================
+        _hasRemoteDescription = true;
+        foreach (var c in _pendingIceCandidates)
+        {
+            StartCoroutine(AddIceCandidate(c.candidate, c.sdpMid, c.sdpMLineIndex));
+        }
+        _pendingIceCandidates.Clear();
 
         var answerOp = _pc.CreateAnswer();
         yield return answerOp;
@@ -185,7 +214,10 @@ public class PCScreenShotReceiver : MonoBehaviour
         Debug.Log("[PC] Answer sent.");
     }
 
-    private IEnumerator AddIceCandidate(string candidate, string sdpMid, int sdpMLineIndex)
+    // -------------------------------------------------------------------------
+    // Reconnect
+    // -------------------------------------------------------------------------
+private IEnumerator AddIceCandidate(string candidate, string sdpMid, int sdpMLineIndex)
     {
         _pc.AddIceCandidate(new RTCIceCandidate(new RTCIceCandidateInit
         {
@@ -193,11 +225,6 @@ public class PCScreenShotReceiver : MonoBehaviour
         }));
         yield return null;
     }
-
-    // -------------------------------------------------------------------------
-    // Reconnect
-    // -------------------------------------------------------------------------
-
     public void UpdateSignalingAddressAndReconnect(string newAddress)
     {
         signalingUrl = newAddress;
@@ -208,7 +235,15 @@ public class PCScreenShotReceiver : MonoBehaviour
     {
         Debug.Log("[PC] Restarting connection...");
         _remoteDataChannel?.Close();
+        _hasRemoteDescription = false;
+        _pendingIceCandidates.Clear();
+
+        _remoteDataChannel?.Close();
+        _remoteDataChannel?.Dispose();
+        _remoteDataChannel = null;
+
         _pc?.Close();
+        _pc?.Dispose();
         if (_ws != null && _ws.State != NativeWebSocket.WebSocketState.Closed)
             _ = _ws.Close();
 
@@ -244,7 +279,16 @@ public class PCScreenShotReceiver : MonoBehaviour
                 break;
             case "ice":
                 if (!string.IsNullOrEmpty(msg.candidate))
-                    StartCoroutine(AddIceCandidate(msg.candidate, msg.sdpMid, msg.sdpMLineIndex));
+                {
+                    if (!_hasRemoteDescription) 
+                    {
+                        _pendingIceCandidates.Add(msg);
+                    }
+                    else 
+                    {
+                        StartCoroutine(AddIceCandidate(msg.candidate, msg.sdpMid, msg.sdpMLineIndex));
+                    }
+                }
                 break;
         }
     }
@@ -299,6 +343,9 @@ public class PCScreenShotReceiver : MonoBehaviour
     {
         SnapshotMeta metadata = null;
         string rgbPath = null, depthPath = null, metaPath = null;
+        
+        // CREATE A DISTINCT PREFIX FOR RETRY FILES
+        string filePrefix = isRetry ? "Retry_" : "";
 
         try
         {
@@ -319,7 +366,8 @@ public class PCScreenShotReceiver : MonoBehaviour
             try
             {
                 byte[] imageBytes = Convert.FromBase64String(metadata.imageRGB);
-                rgbPath = Path.Combine(saveFolder, $"RGB_{id}.jpg");
+                // Apply the prefix here
+                rgbPath = Path.Combine(saveFolder, $"{filePrefix}RGB_{id}.jpg");
                 File.WriteAllBytes(rgbPath, imageBytes);
                 Debug.Log($"[PC] RGB saved: {rgbPath}");
             }
@@ -331,7 +379,8 @@ public class PCScreenShotReceiver : MonoBehaviour
             try
             {
                 byte[] depthBytes = Convert.FromBase64String(metadata.imageDepth);
-                depthPath = Path.Combine(saveFolder, $"Depth_{id}.bin");
+                // Apply the prefix here
+                depthPath = Path.Combine(saveFolder, $"{filePrefix}Depth_{id}.bin");
                 File.WriteAllBytes(depthPath, depthBytes);
                 Debug.Log($"[PC] Depth saved: {depthPath}");
             }
@@ -349,14 +398,15 @@ public class PCScreenShotReceiver : MonoBehaviour
         {
             metadata.imageRGB   = "";
             metadata.imageDepth = "";
-            metaPath = Path.Combine(saveFolder, $"Meta_{id}.json");
+            // Apply the prefix here
+            metaPath = Path.Combine(saveFolder, $"{filePrefix}Meta_{id}.json");
             File.WriteAllText(metaPath, JsonUtility.ToJson(metadata, true));
             Debug.Log($"[PC] Metadata saved: {metaPath}");
         }
         catch (Exception e) { Debug.LogError($"[PC] Failed to save metadata JSON for {id}. Error: {e.Message}"); }
 
         // =====================================================================
-        // THE FIX: Only call the main /process server route if this is NOT a retry
+        // Trigger server requests with the specific file paths
         // =====================================================================
         if (rgbPath != null && depthPath != null && metaPath != null)
         {
@@ -366,7 +416,9 @@ public class PCScreenShotReceiver : MonoBehaviour
             }
             else
             {
-                Debug.Log($"[PC] Retry capture saved to disk for '{id}'. The background RetryLoop will automatically read these new files on its next tick.");
+                Debug.Log($"[PC] Fresh retry capture saved to disk for '{id}'. Sending to server immediately.");
+                // Because we pass rgbPath directly, Python will read the "Retry_RGB" file!
+                StartCoroutine(RequestRetryFromServer(id, rgbPath, depthPath, metaPath));
             }
         }
         else
@@ -459,7 +511,7 @@ public class PCScreenShotReceiver : MonoBehaviour
             req.uploadHandler   = new UploadHandlerRaw(payload);
             req.downloadHandler = new DownloadHandlerBuffer();
             req.SetRequestHeader("Content-Type", "application/json");
-            req.timeout = 60;
+            req.timeout = 120;
 
             yield return req.SendWebRequest();
 
@@ -499,36 +551,12 @@ public class PCScreenShotReceiver : MonoBehaviour
 
            
         }
-         if (_retryCoroutine != null)
-            {
-                StopCoroutine(_retryCoroutine);
-                _retryCoroutine = null;
-                Debug.Log("[PC] Cancelled previous retry loop — new /process request started.");
-            }
-            _retryCoroutine = StartCoroutine(RetryLoop(id));
+        
     }
 
-    private IEnumerator RetryLoop(string captureId)
-{
-    Debug.Log($"[PC/Retry] Starting retry loop for '{captureId}' every {retryIntervalSeconds}s.");
-
-    while (true)
+   private IEnumerator RequestRetryFromServer(string captureId, string rgbPath, string depthPath, string metaPath)
     {
-        yield return new WaitForSeconds(retryIntervalSeconds);
-
-        // The Quest sends a fresh capture for each retry. For now the PC
-        // re-uses the same files from the original /process call — the
-        // server only uses the new image for detection, and the world-space
-        // reprojection still works with the original depth + meta.
-        //
-        // If you later want the Quest to send a brand-new image each interval,
-        // hook into SaveSnapshotToDisk to update _lastRgbPath etc., and
-        // guard here so you only call /retry once a new image has arrived.
-        if (_lastCaptureId != captureId) yield break;  // superseded by a newer /process
-
-        string rgbPath   = Path.Combine(saveFolder, $"RGB_{captureId}.jpg");
-        string depthPath = Path.Combine(saveFolder, $"Depth_{captureId}.bin");
-        string metaPath  = Path.Combine(saveFolder, $"Meta_{captureId}.json");
+        Debug.Log($"[PC/Retry] Requesting retry detection for '{captureId}' using newly saved image.");
 
         var body = new RetryRequestBody
         {
@@ -551,7 +579,7 @@ public class PCScreenShotReceiver : MonoBehaviour
             if (req.result != UnityWebRequest.Result.Success)
             {
                 Debug.LogWarning($"[PC/Retry] Request failed for '{captureId}': {req.error}");
-                continue;  // try again next interval
+                yield break;
             }
 
             string responseJson = req.downloadHandler.text;
@@ -560,29 +588,32 @@ public class PCScreenShotReceiver : MonoBehaviour
             catch (Exception e)
             {
                 Debug.LogError($"[PC/Retry] Failed to parse retry response: {e.Message}");
-                continue;
-            }
-
-            if (parsed == null) continue;
-
-            if (parsed.retry_complete)
-            {
-                Debug.Log($"[PC/Retry] All objects found for '{captureId}'. Stopping retry loop.");
                 yield break;
             }
 
-            if (parsed.ar_overlays != null && parsed.ar_overlays.Length > 0)
+            if (parsed == null) yield break;
+
+            if (parsed.retry_complete || (parsed.ar_overlays != null && parsed.ar_overlays.Length > 0))
             {
-                Debug.Log($"[PC/Retry] {parsed.ar_overlays.Length} new overlay(s) for '{captureId}'. Relaying as RETRY.");
+                if (parsed.retry_complete)
+                {
+                    Debug.Log($"[PC/Retry] All objects found for '{captureId}'. Relaying completion to Quest.");
+                }
+                else
+                {
+                    Debug.Log($"[PC/Retry] {parsed.ar_overlays.Length} new overlay(s) for '{captureId}'. Relaying as RETRY.");
+                }
+                
+                // CRITICAL: Actually send the data to the Quest!
                 RelayRetryToQuest(responseJson);
             }
             else
             {
-                Debug.Log($"[PC/Retry] Nothing new yet for '{captureId}'.");
+                Debug.Log($"[PC/Retry] Nothing new found in this retry image for '{captureId}'.");
             }
+           
         }
     }
-}
 
 
 private void RelayRetryToQuest(string retryJson)
