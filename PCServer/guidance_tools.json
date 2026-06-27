@@ -3,6 +3,7 @@
     {
       
       "tool_name": "indicator_arrow",
+      "enabled":false,
       "when_to_use": "Use for almost all steps where the user needs to find or interact with a specific object. This is the default tool.",
       "when_not_to_use": "Do not use when the user needs to wait, move in a direction, or perform a precise hand gesture.",
       "settings": [
@@ -24,6 +25,43 @@
     
       
     },
+    {
+      "tool_name": "move",
+      "enabled": true,
+      "when_to_use": "Use when an object is being relocated from one specific point to another specific destination.",
+      "when_not_to_use": "Do not use if the destination is unknown or off-screen.",
+      "settings": [
+        {
+          "name": "role",
+          "type": "string",
+          "allowed_values": ["source", "target"],
+          "description": "'source' is the object being moved. 'target' is where it goes."
+        },
+        {
+          "name": "placement_rule",
+          "type": "string",
+          "allowed_values": ["up", "front"],
+          "default": "up",
+          "description": "Where to anchor the endpoints. Use up ONLY when the top of the object is VISIBLE and AVAILABLE for an overlay, otherwise use FRONT."
+        }
+      ]
+    },
+    {
+      "tool_name": "chop_line",
+      "enabled": true,
+      "when_to_use": "Use when the user must cut, slice, dice, mince, or chop an item with a blade.",
+      "when_not_to_use": "Do not use for picking up, moving, or wiping objects.",
+      "settings": [
+        {
+          "name": "placement_rule",
+          "type": "string",
+          "allowed_values": ["up"],
+          "default": "up",
+          "description": "Always placed floating just above the top face of the item."
+        }
+      ]
+    },
+    
     {
       "tool_name": "directional_arrow",
       "enabled": false,
@@ -60,7 +98,7 @@
    {
       "tool_name": "ghost_hand",
       "enabled": true,
-      "when_to_use": "Use when the step requires physical hand interaction. Choose 'poke' to press buttons, tap, or flip switches. Choose 'grab' ONLY to physically pick up, carry, or take hold of an object. Choose 'clean' ONLY when friction is applied to a surface, such as wiping, scrubbing, dusting, or sweeping. Never use 'clean' for picking items up.",
+      "when_to_use": "Use when the step requires physical hand interaction. Choose 'poke' to press buttons, tap, or flip switches. Choose 'grab' ONLY to physically pick up, carry, or take hold of an object. Choose 'clean' ONLY when friction is applied to a surface, such as wiping, scrubbing, dusting, or sweeping. Never use 'clean' for picking items up.Choose 'rotate' for turning knobs, twisting caps, or spinning dials.",
       "when_not_to_use": "Do not use for simple navigation steps or directional movement with no hand action.",
       "settings": [
         {
@@ -69,9 +107,9 @@
           "allowed_values": [
             "poke",
             "grab",
-            "clean"
+            "clean","rotate"
           ],
-          "description": "'poke' — fingertip forward, aimed at the object. 'grab' — open palm forward, aimed at the object. 'clean' — palm facing the user."
+          "description": "'poke' — fingertip forward, aimed at the object. 'grab' — open palm forward, aimed at the object. 'clean' — palm facing the user.'rotate' — gripping and twisting motion."
         },
         {
           "name": "placement_rule",
@@ -81,7 +119,7 @@
             "up"
           ],
           "default": "up",
-          "description": "STRICT RULES: If gesture is 'grab', this MUST be 'up'. If gesture is 'clean', this MUST be 'up'. If gesture is 'poke', this MUST be 'front'."
+          "description": "STRICT RULES: If gesture is 'grab', this MUST be 'up'. If gesture is 'clean', this MUST be 'up'. If gesture is 'poke', this MUST be 'front'.If gesture is 'rotate', use 'front' for wall/panel knobs, or 'up' for jar caps."
         }
       ]
     },

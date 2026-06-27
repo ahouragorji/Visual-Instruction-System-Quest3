@@ -29,6 +29,11 @@ public class PCScreenShotReceiver : MonoBehaviour
     [Tooltip("How often (seconds) the PC polls /retry after a /process call.")]
     public float retryIntervalSeconds = 10f;
     
+    [Header("Error Handling")]
+    [Tooltip("How many times to attempt the server request before giving up.")]
+    public int maxServerRetries = 3;
+    [Tooltip("How long to wait (in seconds) between failed server attempts.")]
+    public float errorRetryDelaySeconds = 2f;
 
     [Serializable]
     private class RetryRequestBody
@@ -489,7 +494,7 @@ private IEnumerator AddIceCandidate(string candidate, string sdpMid, int sdpMLin
         public AROverlay[] ar_overlays;
     }
 
-    private IEnumerator RequestInstructionsFromServer(string id, string rgbPath, string depthPath,
+  private IEnumerator RequestInstructionsFromServer(string id, string rgbPath, string depthPath,
                                                         string metaPath, string command, bool useYoloe, string intent)
     {
         var body = new ServerRequestBody
@@ -499,65 +504,74 @@ private IEnumerator AddIceCandidate(string candidate, string sdpMid, int sdpMLin
             depthPath = FormatPathForServer(depthPath),
             metaPath  = FormatPathForServer(metaPath),
             command   = command,
-             useYoloe  = useYoloe,               
-        intent    = intent 
+            useYoloe  = useYoloe,               
+            intent    = intent 
         };
 
-        Debug.Log($"[PC] Requesting instructions for '{id}' from: {detectionServerUrl}");
+        string jsonPayload = JsonUtility.ToJson(body);
 
-        using (var req = new UnityWebRequest(detectionServerUrl, "POST"))
+        for (int attempt = 1; attempt <= maxServerRetries; attempt++)
         {
-            byte[] payload = Encoding.UTF8.GetBytes(JsonUtility.ToJson(body));
-            req.uploadHandler   = new UploadHandlerRaw(payload);
-            req.downloadHandler = new DownloadHandlerBuffer();
-            req.SetRequestHeader("Content-Type", "application/json");
-            req.timeout = 120;
+            Debug.Log($"[PC] Requesting instructions for '{id}' from: {detectionServerUrl} (Attempt {attempt}/{maxServerRetries})");
 
-            yield return req.SendWebRequest();
-
-            if (req.result != UnityWebRequest.Result.Success)
+            using (var req = new UnityWebRequest(detectionServerUrl, "POST"))
             {
-                Debug.LogError($"[PC] Server request failed for '{id}': {req.error}. " +
-                                $"Response: {req.downloadHandler?.text}");
-                yield break;
+                byte[] payload = Encoding.UTF8.GetBytes(jsonPayload);
+                req.uploadHandler   = new UploadHandlerRaw(payload);
+                req.downloadHandler = new DownloadHandlerBuffer();
+                req.SetRequestHeader("Content-Type", "application/json");
+                req.timeout = 120; // Keep this high if YOLOE/SAM takes a while
+
+                yield return req.SendWebRequest();
+
+                if (req.result == UnityWebRequest.Result.Success)
+                {
+                    string responseJson = req.downloadHandler.text;
+                    Debug.Log($"[PC] Server responded for '{id}': {responseJson.Length} chars.");
+
+                    InstructionResponse parsed = null;
+                    try
+                    {
+                        parsed = JsonUtility.FromJson<InstructionResponse>(responseJson);
+                    }
+                    catch (Exception e)
+                    {
+                        Debug.LogError($"[PC] Failed to parse server response for '{id}': {e.Message}");
+                        yield break; // A parsing error means the data is fundamentally broken, so we abort.
+                    }
+
+                    if (parsed != null && parsed.ar_overlays != null && parsed.ar_overlays.Length > 0)
+                    {
+                        Debug.Log($"[PC] Relaying {parsed.ar_overlays.Length} overlays to Quest for '{id}'.");
+                        RelayInstructionsToQuest(responseJson);
+                        _lastCaptureId = id;
+                    }
+                    else
+                    {
+                        Debug.LogWarning($"[PC] Server returned no ar_overlays for '{id}'. Nothing to relay.");
+                    }
+                    
+                    yield break; // SUCCESS: Exit the coroutine completely.
+                }
+                else
+                {
+                    Debug.LogError($"[PC] Server request failed for '{id}': {req.error}. Response: {req.downloadHandler?.text}");
+                    
+                    if (attempt < maxServerRetries)
+                    {
+                        Debug.Log($"[PC] Retrying in {errorRetryDelaySeconds} seconds...");
+                        yield return new WaitForSeconds(errorRetryDelaySeconds);
+                    }
+                    else
+                    {
+                        Debug.LogError($"[PC] Exhausted all {maxServerRetries} retries for '{id}'. Pipeline stopped for this request.");
+                    }
+                }
             }
-
-            string responseJson = req.downloadHandler.text;
-            Debug.Log($"[PC] Server responded for '{id}': {responseJson.Length} chars.");
-
-            // Validate the response parses correctly before relaying.
-            // We check ar_overlays (not the old 'placements') to confirm the
-            // server is running the updated app.py.
-            InstructionResponse parsed = null;
-            try
-            {
-                parsed = JsonUtility.FromJson<InstructionResponse>(responseJson);
-            }
-            catch (Exception e)
-            {
-                Debug.LogError($"[PC] Failed to parse server response for '{id}': {e.Message}");
-                yield break;
-            }
-
-            if (parsed == null || parsed.ar_overlays == null || parsed.ar_overlays.Length == 0)
-            {
-                Debug.LogWarning($"[PC] Server returned no ar_overlays for '{id}'. Nothing to relay.");
-                yield break;
-            }
-
-            Debug.Log($"[PC] Relaying {parsed.ar_overlays.Length} overlays to Quest for '{id}'.");
-            RelayInstructionsToQuest(responseJson);
-            _lastCaptureId = id;
-
-           
         }
-        
     }
-
-   private IEnumerator RequestRetryFromServer(string captureId, string rgbPath, string depthPath, string metaPath)
+private IEnumerator RequestRetryFromServer(string captureId, string rgbPath, string depthPath, string metaPath)
     {
-        Debug.Log($"[PC/Retry] Requesting retry detection for '{captureId}' using newly saved image.");
-
         var body = new RetryRequestBody
         {
             id        = captureId,
@@ -566,52 +580,64 @@ private IEnumerator AddIceCandidate(string candidate, string sdpMid, int sdpMLin
             metaPath  = FormatPathForServer(metaPath),
         };
 
-        using (var req = new UnityWebRequest(retryServerUrl, "POST"))
+        string jsonPayload = JsonUtility.ToJson(body);
+
+        for (int attempt = 1; attempt <= maxServerRetries; attempt++)
         {
-            byte[] payload = Encoding.UTF8.GetBytes(JsonUtility.ToJson(body));
-            req.uploadHandler   = new UploadHandlerRaw(payload);
-            req.downloadHandler = new DownloadHandlerBuffer();
-            req.SetRequestHeader("Content-Type", "application/json");
-            req.timeout = 30;
+            Debug.Log($"[PC/Retry] Requesting retry detection for '{captureId}' (Attempt {attempt}/{maxServerRetries})");
 
-            yield return req.SendWebRequest();
-
-            if (req.result != UnityWebRequest.Result.Success)
+            using (var req = new UnityWebRequest(retryServerUrl, "POST"))
             {
-                Debug.LogWarning($"[PC/Retry] Request failed for '{captureId}': {req.error}");
-                yield break;
-            }
+                byte[] payload = Encoding.UTF8.GetBytes(jsonPayload);
+                req.uploadHandler   = new UploadHandlerRaw(payload);
+                req.downloadHandler = new DownloadHandlerBuffer();
+                req.SetRequestHeader("Content-Type", "application/json");
+                req.timeout = 30;
 
-            string responseJson = req.downloadHandler.text;
-            RetryResponse parsed = null;
-            try { parsed = JsonUtility.FromJson<RetryResponse>(responseJson); }
-            catch (Exception e)
-            {
-                Debug.LogError($"[PC/Retry] Failed to parse retry response: {e.Message}");
-                yield break;
-            }
+                yield return req.SendWebRequest();
 
-            if (parsed == null) yield break;
-
-            if (parsed.retry_complete || (parsed.ar_overlays != null && parsed.ar_overlays.Length > 0))
-            {
-                if (parsed.retry_complete)
+                if (req.result == UnityWebRequest.Result.Success)
                 {
-                    Debug.Log($"[PC/Retry] All objects found for '{captureId}'. Relaying completion to Quest.");
+                    string responseJson = req.downloadHandler.text;
+                    RetryResponse parsed = null;
+                    try { parsed = JsonUtility.FromJson<RetryResponse>(responseJson); }
+                    catch (Exception e)
+                    {
+                        Debug.LogError($"[PC/Retry] Failed to parse retry response: {e.Message}");
+                        yield break;
+                    }
+
+                    if (parsed != null && (parsed.retry_complete || (parsed.ar_overlays != null && parsed.ar_overlays.Length > 0)))
+                    {
+                        if (parsed.retry_complete)
+                            Debug.Log($"[PC/Retry] All objects found for '{captureId}'. Relaying completion to Quest.");
+                        else
+                            Debug.Log($"[PC/Retry] {parsed.ar_overlays.Length} new overlay(s) for '{captureId}'. Relaying as RETRY.");
+                        
+                        RelayRetryToQuest(responseJson);
+                    }
+                    else
+                    {
+                        Debug.Log($"[PC/Retry] Nothing new found in this retry image for '{captureId}'.");
+                    }
+
+                    yield break; // SUCCESS: Exit the coroutine.
                 }
                 else
                 {
-                    Debug.Log($"[PC/Retry] {parsed.ar_overlays.Length} new overlay(s) for '{captureId}'. Relaying as RETRY.");
+                    Debug.LogWarning($"[PC/Retry] Request failed for '{captureId}': {req.error}");
+                    
+                    if (attempt < maxServerRetries)
+                    {
+                        Debug.Log($"[PC/Retry] Retrying in {errorRetryDelaySeconds} seconds...");
+                        yield return new WaitForSeconds(errorRetryDelaySeconds);
+                    }
+                    else
+                    {
+                        Debug.LogError($"[PC/Retry] Exhausted retries for '{captureId}'.");
+                    }
                 }
-                
-                // CRITICAL: Actually send the data to the Quest!
-                RelayRetryToQuest(responseJson);
             }
-            else
-            {
-                Debug.Log($"[PC/Retry] Nothing new found in this retry image for '{captureId}'.");
-            }
-           
         }
     }
 

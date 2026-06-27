@@ -26,12 +26,24 @@ public class QuestInstructionReceiver : MonoBehaviour
     public float objectScale = 0.15f;
 
 
-    [Header("Ghost Hand Prefabs")]
+   [Header("Ghost Hand Prefabs")]
     public GameObject ghostHandPokePrefab;
     public GameObject ghostHandGrabPrefab;
     public GameObject ghostHandCleanPrefab;
+    public GameObject ghostHandRotatePrefab; // <-- ADD THIS LINE
     public float ghostHandApproachDistance = 0.25f;
     public float ghostHandSurfaceOffset    = 0.05f;
+
+    
+    [Header("Move Tool Prefabs")]
+    public GameObject moveSourcePrefab;
+    public GameObject moveTargetPrefab;
+
+    private GameObject _moveSourcePrefab => moveSourcePrefab;
+    private GameObject _moveTargetPrefab => moveTargetPrefab;
+
+    [Header("Chop Tool")]
+    public GameObject chopLinePrefab;
 
 
     [Header("Navigation Buttons")]
@@ -67,15 +79,19 @@ public class QuestInstructionReceiver : MonoBehaviour
     private int _currentStepIndex = 0;
     private int _maxStep = 0;
     private Dictionary<string, IToolParser> _parsers = new Dictionary<string, IToolParser>();
-
-    private void Awake()
+    // step → { "source": GameObject, "target": GameObject }
+    private readonly Dictionary<int, Dictionary<string, GameObject>> _moveRolesByStep 
+        = new Dictionary<int, Dictionary<string, GameObject>>();
+        private void Awake()
     {
         if (drawMaterial == null)
         {
             Shader fallback = Shader.Find("Sprites/Default");
             if (fallback != null) drawMaterial = new Material(fallback);
         }
+        _parsers.Add("chop_line", new ChopToolParser(chopLinePrefab, arrowOffset));
 
+        _parsers.Add("move", new MoveToolParser(moveSourcePrefab, moveTargetPrefab, 0.0f));
         // Register tools into the dictionary
         _parsers.Add("indicator_arrow", new IndicatorArrowParser(
             arrowUpPrefab, arrowDownPrefab, arrowFrontPrefab, 
@@ -85,6 +101,7 @@ public class QuestInstructionReceiver : MonoBehaviour
             ghostHandPokePrefab,
             ghostHandGrabPrefab,
             ghostHandCleanPrefab,
+            ghostHandRotatePrefab, // <-- INSERT THIS HERE
             ghostHandApproachDistance,
             ghostHandSurfaceOffset));
             
@@ -201,6 +218,7 @@ public class QuestInstructionReceiver : MonoBehaviour
 
         foreach (var p in parsed.ar_overlays) p.step = stepRemap[p.step];
 
+        
         _currentResponse = parsed;
         _currentStepIndex = 0;
         _maxStep = uniqueSteps.Count;
@@ -211,9 +229,17 @@ public class QuestInstructionReceiver : MonoBehaviour
 
         IsSessionActive = true;
         Debug.Log("[QIR] Session started — new captures blocked.");
-    }
 
-    private void MergeOverlays(AROverlay[] newOverlays)
+        // ADD THIS: Start the auto-retry loop only after the initial results have loaded
+        if (sender != null && !string.IsNullOrEmpty(parsed.id))
+        {
+            sender.StartAutoRetryLoopForId(parsed.id);
+        }
+    
+    }
+    
+
+   private void MergeOverlays(AROverlay[] newOverlays)
 {
     foreach (var overlay in newOverlays)
     {
@@ -225,36 +251,98 @@ public class QuestInstructionReceiver : MonoBehaviour
         if (string.IsNullOrEmpty(overlay.guidance_tool) || string.IsNullOrEmpty(overlay.manipulation_tag))
             continue;
 
-        if (_parsers.TryGetValue(overlay.guidance_tool, out IToolParser parser))
-        {
-            Vector3 headPos = sender != null ? sender.lastCaptureHeadPosition : Camera.main.transform.position;
-            ParsedSpawnData spawnData = parser.Parse(overlay, headPos);
-
-            if (spawnData.PrefabToSpawn != null)
-            {
-                GameObject spawnedObj = Instantiate(spawnData.PrefabToSpawn, spawnData.Position, spawnData.Rotation);
-                spawnedObj.transform.localScale = spawnData.PrefabToSpawn.transform.localScale * objectScale;
-                spawnedObj.name = $"{overlay.guidance_tool}_Step{stepNum}_{overlay.manipulation_tag}";
-
-                // Visibility matches whatever the current step state is
-                spawnedObj.SetActive(stepNum == _currentStepIndex + 1);
-                _overlaysByStep[stepNum].Add(spawnedObj);
-
-                if (overlay.bboxCorners != null && overlay.bboxCorners.Length == 8)
-                {
-                    List<GameObject> edges = SpawnBoundingBoxEdges(spawnedObj, overlay.bboxCorners);
-                    _bboxEdgesByStep[stepNum].AddRange(edges);
-                }
-            }
-        }
-        else
+        if (!_parsers.TryGetValue(overlay.guidance_tool, out IToolParser parser))
         {
             Debug.LogWarning($"[QIR:Merge] Unrecognized guidance tool: {overlay.guidance_tool}");
+            continue;
+        }
+
+        Vector3 headPos = sender != null ? sender.lastCaptureHeadPosition : Camera.main.transform.position;
+        ParsedSpawnData spawnData = parser.Parse(overlay, headPos);
+
+        if (spawnData.PrefabToSpawn == null) continue;
+
+        // ── Instantiate ──────────────────────────────────────────────────────
+        GameObject spawnedObj = Instantiate(spawnData.PrefabToSpawn, spawnData.Position, spawnData.Rotation);
+        spawnedObj.transform.localScale = spawnData.PrefabToSpawn.transform.localScale * objectScale;
+        spawnedObj.name = $"{overlay.guidance_tool}_Step{stepNum}_{overlay.manipulation_tag}";
+        spawnedObj.SetActive(stepNum == _currentStepIndex + 1);
+        _overlaysByStep[stepNum].Add(spawnedObj);
+
+        if (overlay.bboxCorners != null && overlay.bboxCorners.Length == 8)
+        {
+            List<GameObject> edges = SpawnBoundingBoxEdges(spawnedObj, overlay.bboxCorners);
+            _bboxEdgesByStep[stepNum].AddRange(edges);
+        }
+
+        // ── Move wiring — identical to SpawnAllOverlays, spawnedObj exists here
+        if (overlay.guidance_tool == "move")
+{
+    string role = "";
+    foreach (var p in overlay.tool_settings)
+        if (p.key == "role") { role = p.value; break; }
+
+    if (!_moveRolesByStep.ContainsKey(stepNum))
+        _moveRolesByStep[stepNum] = new Dictionary<string, GameObject>();
+
+    _moveRolesByStep[stepNum][role] = spawnedObj;
+
+    string counterpart = (role == "source") ? "target" : "source";
+    if (_moveRolesByStep[stepNum].TryGetValue(counterpart, out GameObject counterpartGo)
+        && counterpartGo != null)
+    {
+        // Both halves now present — wire them
+        GameObject sourceGo = (role == "source") ? spawnedObj : counterpartGo;
+        GameObject targetGo = (role == "target") ? spawnedObj : counterpartGo;
+        var connector = sourceGo.GetComponent<MoveLineConnector>();
+        var anchor    = targetGo.GetComponent<MoveTargetAnchor>();
+        if (connector != null && anchor != null) connector.SetTarget(anchor);
+    }
+    else
+    {
+        // Counterpart not in _moveRolesByStep — it may exist as a
+        // downgraded indicator_arrow. Find and replace it.
+        string arrowName = $"indicator_arrow_Step{stepNum}_";
+        if (_overlaysByStep.TryGetValue(stepNum, out var stepObjects))
+        {
+            for (int idx = 0; idx < stepObjects.Count; idx++)
+            {
+                GameObject existing = stepObjects[idx];
+                if (existing == null || !existing.name.StartsWith(arrowName)) continue;
+
+                // Respawn as the correct move prefab via the move parser
+                Vector3 existingPos = existing.transform.position;
+                Quaternion existingRot = existing.transform.rotation;
+                Destroy(existing);
+
+                // Build a minimal counterpart overlay to re-parse position
+                // We reuse the position already computed — just need the prefab
+                string counterpartRole = counterpart;
+                GameObject counterpartPrefab = (counterpartRole == "source")
+                    ? _moveSourcePrefab
+                    : _moveTargetPrefab;
+
+                if (counterpartPrefab != null)
+                {
+                    GameObject rebuilt = Instantiate(counterpartPrefab, existingPos, existingRot);
+                    rebuilt.transform.localScale = counterpartPrefab.transform.localScale * objectScale;
+                    rebuilt.name = $"move_Step{stepNum}_{counterpartRole}_rebuilt";
+                    rebuilt.SetActive(stepNum == _currentStepIndex + 1);
+                    stepObjects[idx] = rebuilt;
+                    _moveRolesByStep[stepNum][counterpartRole] = rebuilt;
+
+                    // Now wire
+                    GameObject sourceGo = (role == "source") ? spawnedObj : rebuilt;
+                    GameObject targetGo = (role == "target") ? spawnedObj : rebuilt;
+                    var connector = sourceGo.GetComponent<AnimatedCurveConnector>();
+                    var anchor    = targetGo.GetComponent<MoveTargetAnchor>();
+                    if (connector != null && anchor != null) connector.SetTarget(anchor);
+                }
+                break;
+            }
         }
     }
-
-    Debug.Log($"[QIR:Merge] Merged {newOverlays.Length} overlay(s) into existing session.");
-}
+}}}
 
     private void SpawnAllOverlays()
     {
@@ -264,46 +352,65 @@ public class QuestInstructionReceiver : MonoBehaviour
         audioSource.Play();
 
         foreach (var overlay in _currentResponse.ar_overlays)
+    {
+        int stepNum = overlay.step;
+
+        if (!_overlaysByStep.ContainsKey(stepNum))  _overlaysByStep[stepNum]  = new List<GameObject>();
+        if (!_bboxEdgesByStep.ContainsKey(stepNum)) _bboxEdgesByStep[stepNum] = new List<GameObject>();
+
+        if (string.IsNullOrEmpty(overlay.guidance_tool) || string.IsNullOrEmpty(overlay.manipulation_tag))
+            continue;
+
+        if (!_parsers.TryGetValue(overlay.guidance_tool, out IToolParser parser))
         {
-
-            int stepNum = overlay.step;
-
-            if (!_overlaysByStep.ContainsKey(stepNum)) _overlaysByStep[stepNum] = new List<GameObject>();
-            if (!_bboxEdgesByStep.ContainsKey(stepNum)) _bboxEdgesByStep[stepNum] = new List<GameObject>();
-
-            // Text-only placement skip
-            if (string.IsNullOrEmpty(overlay.guidance_tool) || string.IsNullOrEmpty(overlay.manipulation_tag))
-                continue;
-
-            // Route to correct parser based on guidance_tool
-            if (_parsers.TryGetValue(overlay.guidance_tool, out IToolParser parser))
-            {
-                Vector3 headPos = sender != null ? sender.lastCaptureHeadPosition : Camera.main.transform.position;
-                ParsedSpawnData spawnData = parser.Parse(overlay, headPos);
-
-                if (spawnData.PrefabToSpawn != null)
-                {
-                    GameObject spawnedObj = Instantiate(spawnData.PrefabToSpawn, spawnData.Position, spawnData.Rotation);
-                    Vector3 originalScale = spawnData.PrefabToSpawn.transform.localScale;
-
-                    spawnedObj.transform.localScale = originalScale * objectScale; // Default scale logic, adjust per parser if needed
-                    spawnedObj.name = $"{overlay.guidance_tool}_Step{stepNum}_{overlay.manipulation_tag}";
-
-                    _overlaysByStep[stepNum].Add(spawnedObj);
-
-                    if (overlay.bboxCorners != null && overlay.bboxCorners.Length == 8)
-                    {
-                        List<GameObject> edges = SpawnBoundingBoxEdges(spawnedObj, overlay.bboxCorners);
-                        _bboxEdgesByStep[stepNum].AddRange(edges);
-                    }
-                }
-            }
-            else
-            {
-                Debug.LogWarning($"[QIR:Spawn] Unrecognized guidance tool: {overlay.guidance_tool}");
-            }
+            Debug.LogWarning($"[QIR:Spawn] Unrecognized guidance tool: {overlay.guidance_tool}");
+            continue;
         }
-    }
+
+        Vector3 headPos = sender != null ? sender.lastCaptureHeadPosition : Camera.main.transform.position;
+        ParsedSpawnData spawnData = parser.Parse(overlay, headPos);
+
+        if (spawnData.PrefabToSpawn == null) continue;
+
+        // ── Instantiate first ────────────────────────────────────────────────
+        GameObject spawnedObj = Instantiate(spawnData.PrefabToSpawn, spawnData.Position, spawnData.Rotation);
+        spawnedObj.transform.localScale = spawnData.PrefabToSpawn.transform.localScale * objectScale;
+        spawnedObj.name = $"{overlay.guidance_tool}_Step{stepNum}_{overlay.manipulation_tag}";
+        _overlaysByStep[stepNum].Add(spawnedObj);
+
+        if (overlay.bboxCorners != null && overlay.bboxCorners.Length == 8)
+        {
+            List<GameObject> edges = SpawnBoundingBoxEdges(spawnedObj, overlay.bboxCorners);
+            _bboxEdgesByStep[stepNum].AddRange(edges);
+        }
+
+        // ── Move wiring — only after spawnedObj exists ───────────────────────
+        if (overlay.guidance_tool == "move")
+        {
+            
+            string role = "";
+            foreach (var p in overlay.tool_settings)
+                if (p.key == "role") { role = p.value; break; }
+
+            if (!_moveRolesByStep.ContainsKey(stepNum))
+                _moveRolesByStep[stepNum] = new Dictionary<string, GameObject>();
+
+            _moveRolesByStep[stepNum][role] = spawnedObj;
+
+            string counterpart = (role == "source") ? "target" : "source";
+            if (_moveRolesByStep[stepNum].TryGetValue(counterpart, out GameObject counterpartGo)
+                && counterpartGo != null)
+            {
+                GameObject sourceGo = (role == "source") ? spawnedObj : counterpartGo;
+                GameObject targetGo = (role == "target") ? spawnedObj : counterpartGo;
+
+                var connector = sourceGo.GetComponent<AnimatedCurveConnector>();
+                var anchor    = targetGo.GetComponent<MoveTargetAnchor>();
+                if (connector != null && anchor != null) connector.SetTarget(anchor);
+            }
+            // else: counterpart arrives via retry — MergeOverlays handles wiring then
+        }
+    }}
 
     private void ClearAllSpawnedObjects()
     {

@@ -618,16 +618,26 @@ private IEnumerator CaptureImages()
 
     Debug.Log($"[Quest] Capture {timestamp} fully sent ({total} chunks).");
     // Cancel any previous loop in case user fired a second capture
-    StopRetryLoop();
+    // StopRetryLoop();
 
-    if (!string.IsNullOrEmpty(_lastCaptureId))
-    {
-        _retryLoopCoroutine = StartCoroutine(AutoRetryLoop(_lastCaptureId));
-        Debug.Log($"[Quest] Auto-retry loop started for '{_lastCaptureId}' every {retryIntervalSeconds}s.");
-    }
+    // if (!string.IsNullOrEmpty(_lastCaptureId))
+    // {
+    //     _retryLoopCoroutine = StartCoroutine(AutoRetryLoop(_lastCaptureId));
+    //     Debug.Log($"[Quest] Auto-retry loop started for '{_lastCaptureId}' every {retryIntervalSeconds}s.");
+    // }
     _capturing = false;
 }
-
+public void StartAutoRetryLoopForId(string captureId)
+    {
+        StopRetryLoop(); // Cancel any existing loops just in case
+        
+        if (!string.IsNullOrEmpty(captureId))
+        {
+            _lastCaptureId = captureId;
+            _retryLoopCoroutine = StartCoroutine(AutoRetryLoop(captureId));
+            Debug.Log($"[Quest] Auto-retry loop started for '{captureId}' every {retryIntervalSeconds}s.");
+        }
+    }
 private IEnumerator AutoRetryLoop(string captureId)
 {
     while (true)
@@ -647,7 +657,12 @@ private IEnumerator AutoRetryLoop(string captureId)
             Debug.Log("[Quest] Retry skipped — capture already in progress.");
             continue;
         }
-
+        if (_dataChannel.BufferedAmount > 0)
+        {
+            Debug.LogWarning($"[Quest] Skipping retry: Network is still busy sending data ({_dataChannel.BufferedAmount} bytes buffered).");
+            continue;
+        }
+        
         bool isChannelOpen = _dataChannel != null && _dataChannel.ReadyState == RTCDataChannelState.Open;
         if (!isChannelOpen)
         {

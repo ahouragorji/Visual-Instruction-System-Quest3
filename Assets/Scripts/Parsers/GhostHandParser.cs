@@ -9,6 +9,7 @@ namespace Alpha.Parsers
         private readonly GameObject _pokePrefab;
         private readonly GameObject _grabPrefab;
         private readonly GameObject _cleanPrefab;
+        private readonly GameObject _rotatePrefab; // NEW: Added Rotate Prefab
 
         private readonly float _approachDistance;
         private readonly float _surfaceOffset;
@@ -17,12 +18,14 @@ namespace Alpha.Parsers
             GameObject pokePrefab,
             GameObject grabPrefab,
             GameObject cleanPrefab,
+            GameObject rotatePrefab, // NEW: Added to constructor
             float approachDistance = 0.0f,
             float surfaceOffset    = 0.0f)
         {
             _pokePrefab        = pokePrefab;
             _grabPrefab        = grabPrefab;
             _cleanPrefab       = cleanPrefab;
+            _rotatePrefab      = rotatePrefab; // NEW
             _approachDistance  = approachDistance;
             _surfaceOffset     = surfaceOffset;
         }
@@ -36,14 +39,17 @@ namespace Alpha.Parsers
             GameObject prefab;
             switch (gesture)
             {
-                case "grab":  prefab = _grabPrefab;  break;
-                case "clean": prefab = _cleanPrefab; break;
-                default:      prefab = _pokePrefab;  break;
+                case "grab":   prefab = _grabPrefab;   break;
+                case "clean":  prefab = _cleanPrefab;  break;
+                case "rotate": prefab = _rotatePrefab; break; // NEW: Route to rotate
+                default:       prefab = _pokePrefab;   break;
             }
 
             if (prefab == null) return new ParsedSpawnData();
 
             Vector3 center = new Vector3(overlay.worldX, overlay.worldY, overlay.worldZ);
+            
+            // Assuming rotate uses the approach distance so the hand hovers just off the knob/cap
             float offset = (gesture == "clean") ? _surfaceOffset : _approachDistance;
 
             // ── 2. Calculate User Vectors ─────────────────────────────────────
@@ -66,9 +72,26 @@ namespace Alpha.Parsers
             if (gesture == "poke")
             {
                 // POKING: Always approaches exactly along the 3D line of sight.
-                // It angles downward/upward perfectly from the user's view.
                 finalPos = center + (trueToUser * offset);
                 finalRot = Quaternion.LookRotation(-trueToUser, Vector3.up);
+            }
+            else if (gesture == "rotate")
+            {
+                // NEW: ROTATING LOGIC
+                if (placementRule == "up")
+                {
+                    // e.g., Twisting a cap off a jar on a table.
+                    // Hand floats above the object and points perfectly DOWN.
+                    finalPos = center + (Vector3.up * offset);
+                    finalRot = Quaternion.LookRotation(Vector3.down, flatToUser);
+                }
+                else 
+                {
+                    // e.g., Twisting a knob on an oven/wall.
+                    // Hand floats in front of the object and points directly IN at it.
+                    finalPos = center + (trueToUser * offset);
+                    finalRot = Quaternion.LookRotation(-trueToUser, Vector3.up);
+                }
             }
             else if (placementRule == "up")
             {
@@ -91,8 +114,6 @@ namespace Alpha.Parsers
             {
                 // FRONT PLACEMENT: Grabbing or Cleaning a wall/appliance face
                 finalPos = center + (flatToUser * offset);
-                GameObject.CreatePrimitive(PrimitiveType.Sphere)
-                .transform.position = finalPos;
 
                 if (gesture == "clean")
                 {
