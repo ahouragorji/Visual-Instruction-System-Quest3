@@ -4,6 +4,12 @@ This is a simple mixed-reality assistant that places animated 3D arrows directly
 
 No pre-built maps. No QR codes. No environment scanning sessions. One photo, one depth frame, one API call.
 
+
+
+
+https://github.com/user-attachments/assets/0a0ac61c-eee7-440a-bb50-987082138721
+
+
 ---
 
 ## The core insight
