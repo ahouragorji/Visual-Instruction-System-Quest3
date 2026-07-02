@@ -8,55 +8,59 @@ public class ArrowInteraction : MonoBehaviour
     public string handTag = "PlayerHand";
     public string handLayer = "VR_Hands";
 
-    [Header("NextStep")]
-
-
     [Header("Visual Effects")]
     public ParticleSystem destructionParticles;
 
     private bool _isDestroying = false;
 
-    // 1. THIS LISTENS TO DUMB PHYSICS (Poking / Bumping)
     private void OnTriggerEnter(Collider other)
     {
         bool isHand = other.CompareTag(handTag) || other.gameObject.layer == LayerMask.NameToLayer(handLayer);
-        
-        if (isHand)
-        {
-            Disintegrate(); // Trigger the exact same explosion
-        }
+        if (isHand) Disintegrate();
     }
 
-    // 2. THIS LISTENS TO THE INTERACTION SDK (Pinching / Gripping)
     public void Disintegrate()
     {
-
-        
         if (_isDestroying) return;
         _isDestroying = true;
 
-        //questInstructionReceiver.AdvanceToNextStep();
-        // Turn off the collider so it can't be touched twice
+        Debug.Log($"[ArrowInteraction] Disintegrate called on '{gameObject.name}' | " +
+                  $"active={gameObject.activeInHierarchy} | instanceID={gameObject.GetInstanceID()}");
+
         GetComponent<Collider>().enabled = false;
 
-        MeshRenderer meshRenderer = GetComponentInChildren<MeshRenderer>();
+        var renderers = GetComponentsInChildren<Renderer>(includeInactive: true);
+        Debug.Log($"[ArrowInteraction] Found {renderers.Length} Renderer(s) on '{gameObject.name}':");
+        foreach (var r in renderers)
+            Debug.Log($"  - {r.GetType().Name} on '{r.gameObject.name}' | enabled={r.enabled} | visible={r.isVisible}");
 
         if (destructionParticles != null)
         {
             ParticleSystem ash = Instantiate(destructionParticles, transform.position, transform.rotation);
-            
-            if (meshRenderer != null)
-            {
-                var main = ash.main;
-                main.startColor = meshRenderer.material.color; 
-            }
+            var main = ash.main;
+            if (renderers.Length > 0 && renderers[0] is MeshRenderer mr)
+                main.startColor = mr.material.color;
+            float lifetime = main.duration + main.startLifetime.constantMax;
+            Destroy(ash.gameObject, lifetime);
+            Debug.Log($"[ArrowInteraction] Particles spawned, will self-destroy in {lifetime:F1}s");
         }
-
-        if (meshRenderer != null)
+        else
         {
-            meshRenderer.enabled = false;
+            Debug.LogWarning($"[ArrowInteraction] destructionParticles is NULL on '{gameObject.name}'");
         }
 
+        foreach (var r in renderers)
+            r.enabled = false;
+
+        Debug.Log($"[ArrowInteraction] All renderers disabled. Scheduling Destroy in 1 frame.");
+        StartCoroutine(DestroyNextFrame());
+    }
+
+    private IEnumerator DestroyNextFrame()
+    {
+        yield return null;
+        Debug.Log($"[ArrowInteraction] Destroy executing on '{gameObject.name}' | " +
+                  $"still exists={this != null}");
         Destroy(gameObject);
     }
 }

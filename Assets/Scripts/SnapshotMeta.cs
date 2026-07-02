@@ -45,10 +45,6 @@ public class SnapshotMeta
 
     // the voice command 
     public string command;
-
-
-    public bool   useYoloe;   // true → YOLOE (fast); false → GroundingDINO (accurate)
-    public string intent;     // "task" | "query"  — bypasses LLM intent detection
     // ── Convenience accessors ──
 
     /// <summary>Unity world-space position of the RGB camera at capture time.</summary>
@@ -70,4 +66,8 @@ public class SnapshotMeta
     /// </summary>
     public string ColmapIntrinsicsString =>
         $"PINHOLE {imageWidth} {imageHeight} {fx} {fy} {cx} {cy}";
+
+    public string intent;
+
+    public bool   useYoloe; 
 }

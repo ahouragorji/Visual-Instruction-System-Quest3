@@ -55,7 +55,12 @@ public class QuestInstructionReceiver : MonoBehaviour
     public TMP_InputField commandInputField;
     public TMP_Text stepCounterText;
     public AudioSource audioSource;
+    public AudioSource successAudio;
+    
+
     [SerializeField] AudioClip clip;
+    [SerializeField] AudioClip successClip;
+
 
 
     [Header("TTS agent")]
@@ -349,6 +354,7 @@ public class QuestInstructionReceiver : MonoBehaviour
         ClearAllSpawnedObjects();
 
         audioSource.clip = clip;
+        successAudio.clip = successClip;
         audioSource.Play();
 
         foreach (var overlay in _currentResponse.ar_overlays)
@@ -482,7 +488,7 @@ public class QuestInstructionReceiver : MonoBehaviour
         
         // THE FIX: Kill the retry loop when user abandons
         OnRetryComplete?.Invoke(); 
-        
+        successAudio.Play();
         Debug.Log("[QIR] Session abandoned — new captures allowed.");
     }
 
@@ -497,7 +503,7 @@ public class QuestInstructionReceiver : MonoBehaviour
                 
                 // THE FIX: Kill the retry loop when user finishes the task
                 OnRetryComplete?.Invoke(); 
-                
+                successAudio.Play();
                 Debug.Log("[QIR] Session complete — new captures allowed.");
             }
             return;

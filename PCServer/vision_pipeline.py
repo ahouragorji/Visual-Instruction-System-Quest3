@@ -178,20 +178,32 @@ class TaggedObject(BaseModel):
         )
     )
     user_view: VIEW_ENUM = Field(
-        description=(
-            "The direction from which this object is seen IN THE CAPTURED IMAGE. "
-            "Determine how the camera is oriented relative to this specific object:\n"
-            "  front        — camera faces the object's main surface straight on\n"
-            "  front_left   — camera sees the object slightly from its left side\n"
-            "  front_right  — camera sees the object slightly from its right side\n"
-            "  front_top    — camera looks slightly downward at the object's face\n"
-            "  front_bottom — camera looks slightly upward at the object's face\n"
-            "  top          — camera looks straight down onto the object\n"
-            "  bottom       — camera looks up at the object (ceiling-mounted)\n"
-        )
+    description=(
+        "The viewing angle of the camera relative to this specific object in the captured image.\n"
+        "Think about what surface of the object is most visible to the camera.\n\n"
+        "  top          — camera looks almost straight DOWN onto the object. "
+                         "You see the top face clearly, little to no front face visible. "
+                         "Example: looking down at a floor mat, a book lying flat.\n"
+        "  front_top    — camera looks DOWNWARD at an angle. "
+                         "You see both the top AND front face of the object. "
+                         "THIS IS THE DEFAULT FOR ANY OBJECT RESTING ON A TABLE OR DESK. "
+                         "Example: mug on a desk, jar on a counter, bowl on a table, "
+                         "keyboard, cutting board, any object photographed from standing height.\n"
+        "  front        — camera faces the object's front surface STRAIGHT ON, at eye level. "
+                         "You see the front face only — no top visible at all. "
+                         "Example: a wall socket, a monitor screen, a cabinet door face, "
+                         "a button on an appliance panel.\n"
+        "  front_left   — same as front but the camera is slightly to the object's left.\n"
+        "  front_right  — same as front but the camera is slightly to the object's right.\n"
+        "  front_bottom — camera looks UPWARD at the object. "
+                         "Example: underside of a shelf, ceiling light.\n"
+        "  bottom       — camera looks almost straight UP at the object. "
+                         "Example: ceiling-mounted fixture.\n\n"
+        "RULE: If the object is sitting on any horizontal surface (table, counter, floor, desk), "
+        "the answer is almost always front_top unless you are standing directly over it looking straight down."
     )
-
-
+)
+ 
 class SemanticStep(BaseModel):
     instruction: str = Field(
         description=(
@@ -235,12 +247,22 @@ OBJECT TAGGING RULES (Optimized for GroundingDINO Detection):
   • NEVER include actions, verbs, pronouns, or full sentences in the tag.
   • Groups are allowed: "the scattered shoes".
 
-USER VIEW RULES:
-  Determine how the camera is oriented relative to each object (the visual POV).
-  • flat on floor/table → "top"
-  • facing camera straight on → "front"
-  • seen from slight left → "front_left"
-  • ceiling fixture → "bottom"
+USER VIEW RULES — look at each object individually:
+  MOST COMMON CASE: Any object resting on a table, desk, counter, or floor
+  → use "front_top". This is the default for tabletop scenes.
+
+  Use "top" ONLY when the camera is directly above looking straight down
+  (e.g. aerial shot, camera mounted on ceiling, or object photographed from directly overhead).
+
+  Use "front" ONLY when the object's front face is at eye level with no top surface visible
+  (e.g. wall socket, monitor screen, cabinet door, appliance panel button).
+
+  Use "front_left" / "front_right" for eye-level objects seen from a slight side angle.
+
+  Use "front_bottom" / "bottom" for objects seen from below (ceiling fixtures, underside of shelf).
+
+  NEVER default to "front" for objects that are sitting on a surface —
+  a standing user photographing a desk always sees objects from above, making it front_top.
 
 OUTPUT FORMAT:
   Return exactly ONE step.
@@ -281,9 +303,22 @@ OBJECT TAGGING RULES — READ CAREFULLY:
   ✗ WRONG: tag = "glass and spoon on the table"
   ✓ RIGHT: two entries → tag = "glass with floral pattern", tag = "spoon on the table"
 
-  RULE 2 — TAG EVERY OBJECT THE USER TOUCHES IN A STEP.
-  If the instruction says "scrub the dishes with the sponge", list BOTH the dishes AND the sponge.
-  Never leave objects empty just because the step sounds procedural.
+  RULE 2 — TAG EVERY OBJECT THE USER TOUCHES OR ACTS ON IN A STEP.
+  This includes BOTH the tool being used AND the surface or object being acted upon.
+
+  For wipe/clean steps: tag BOTH the cleaning tool AND the surface being cleaned.
+  ✗ WRONG: "wipe the desk with a cloth"   → objects: [cloth]
+  ✓ RIGHT: "wipe the desk with a cloth"   → objects: [desk surface, clean cloth]
+
+  For use/apply steps: tag BOTH the item being applied AND what it's applied to.
+  ✗ WRONG: "apply soap to the sponge"     → objects: [soap]
+  ✓ RIGHT: "apply soap to the sponge"     → objects: [dish soap, sponge]
+
+  For scrub/chop steps: tag BOTH the tool AND the thing being worked on.
+  ✗ WRONG: "scrub the dishes with a sponge" → objects: [sponge]
+  ✓ RIGHT: "scrub the dishes with a sponge" → objects: [dishes in the sink, sponge]
+
+  Never leave objects with only the tool — the surface or target object is always included.
 
   RULE 3 — TAG OUT-OF-VIEW OBJECTS TOO.
   Our system has a retry loop that searches for objects as the user moves around.
@@ -401,7 +436,10 @@ ACTION RULES — pick the single best match:
   NEVER assign move_item to the destination or move_dest to the thing being carried.
   If only one object is tagged in a move step, use move_item for it.
 
-
+   wipe → the SURFACE being cleaned receives this action, not the cloth or tool doing the wiping.
+         The cleaning tool (cloth, sponge, brush) gets pick_up if it needs to be grabbed first,
+         or other if it's already in hand.
+         Example: "wipe the desk with a cloth" → desk surface=wipe, cloth=pick_up
   
 SIMPLE NOUN RULES:
   ✓ One bare singular noun: "mug", "button", "sponge", "towel"
@@ -513,10 +551,7 @@ def _select_tool(action: str, user_view: str) -> dict:
             "guidance_tool": "move",
             "tool_settings": {"role": "target", "placement_rule": _VIEW_TO_PLACEMENT.get(user_view, "up")},
         }
-
-    # For all remaining actions: front-facing objects always get indicator_arrow
-    if _VIEW_TO_PLACEMENT.get(user_view, "front") == "front":
-        return {"guidance_tool": "indicator_arrow", "tool_settings": {"placement_rule": "front"}}
+            
 
     # Ghost hand actions
     if action in _GHOST_HAND_ACTIONS:
@@ -532,9 +567,13 @@ def _select_tool(action: str, user_view: str) -> dict:
         placement = _VIEW_TO_PLACEMENT.get(user_view, "up")
         return {"guidance_tool": "ghost_hand", "tool_settings": {"gesture": gesture, "placement_rule": placement}}
 
+        # For all remaining actions: front-facing objects always get indicator_arrow
+    if _VIEW_TO_PLACEMENT.get(user_view, "front") == "front":
+        return {"guidance_tool": "indicator_arrow", "tool_settings": {"placement_rule": "front"}}
     # Fallback
     placement = _VIEW_TO_PLACEMENT.get(user_view, "up")
     return {"guidance_tool": "indicator_arrow", "tool_settings": {"placement_rule": placement}}
+
 # ---------------------------------------------------------------------------
 # GPT helpers
 # ---------------------------------------------------------------------------
@@ -593,7 +632,7 @@ def _fetch_object_annotations(plan: SemanticPlan) -> ObjectAnnotationPlan:
     plan_text = "\n".join(plan_lines)
 
     response = client.beta.chat.completions.parse(
-        model="gpt-4o-mini",
+        model="gpt-4o",
         messages=[
             {"role": "system", "content": ANNOTATOR_SYSTEM_PROMPT},
             {"role": "user",   "content": f"Plan to annotate:\n\n{plan_text}"},
@@ -896,14 +935,7 @@ def fetch_step_segmentations(
         #     has_source = any(d["tool_settings"].get("role") == "source" for d in move_detections)
         #     has_target = any(d["tool_settings"].get("role") == "target" for d in move_detections)
 
-            for item in detected_items:
-                step_detections.append({
-                    "guidance_tool": guidance_tool,
-                    "tool_settings": tool_settings,
-                    "label":         tag,
-                    "bbox":          item["bbox"],
-                    "mask":          item["mask"],
-                })
+    
 
         # ── Move pair validation ───────────────────────────────────────────
         # A move overlay is only meaningful when BOTH source and target are

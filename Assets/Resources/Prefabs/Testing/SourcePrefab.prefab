@@ -167,4 +167,4 @@ MonoBehaviour:
   m_EditorClassIdentifier: 
   curveHeight: 0.15
   resolution: 20
-  animationSpeed: -0.5
+  animationSpeed: -0.1
