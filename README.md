@@ -1,6 +1,6 @@
 # 3D Task Assistance on Meta Quest using DepthAPI
 
-This is a simple mixed-reality assistant that places animated 3D arrows directly onto real-world objects in your environment. You speak or type a command ("How to clean my room", "where are the books"), and the system breaks the task into steps, identifies the relevant objects in the scene, and anchors a guidance arrow on each one — aligned in 3D space using the Quest's own depth sensor.
+This is a simple mixed-reality assistant that places animated 3D overlays directly onto real-world objects in your environment. You speak or type a command ("How to clean my room", "where are the books"), and the system breaks the task into steps, identifies the relevant objects in the scene, and anchors a guidance overlay on each one — aligned in 3D space using the Quest's own depth sensor.
 
 No pre-built maps. No QR codes. No environment scanning sessions. One photo, one depth frame, one API call.
 
@@ -55,7 +55,7 @@ The Quest 3 has two physically separate cameras: an RGB passthrough camera and a
 
 `mask_reprojection.py` runs this over up to 200 randomly sampled pixels inside the SAM mask and takes the **median** of the results. 
 
-Then `camera_math.py`, which converts the Unity left-handed quaternion poses into OpenCV right-handed rotation matrices, builds the relative depth-to-RGB transform, and transforms the unprojected camera-space point back into Unity world space so the headset can place an arrow at the correct real-world location.
+Then `camera_math.py`, which converts the Unity left-handed quaternion poses into OpenCV right-handed rotation matrices, builds the relative depth-to-RGB transform, and transforms the unprojected camera-space point back into Unity world space so the headset can place an overlay at the correct real-world location.
 
 ---
 
