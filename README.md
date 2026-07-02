@@ -28,8 +28,14 @@ Here is what happens, in details:
 4. YOLOE detects those objects in the image. SAM 2 segments them precisely.
 5. For each segmented object, the system samples pixels across its mask and uses iterative reprojection to read the true metric depth at each pixel from the depth map.
 6. The mask's centroid is unprojected into 3D camera space and transformed into Unity world coordinates.
-7. The Quest receives a world-space anchor point, an 8-corner 3D bounding box, and a GPT-chosen arrow orientation for each object.
-8. Animated arrows are spawned in the right place, for objects needed to be used to complete the step.
+7. The Quest receives a world-space anchor point, an 8-corner 3D bounding box, and a GPT-chosen orientation for each object.
+8. Animated overlays are spawned in the right place, based on your configuration.
+
+
+There are corrently 3 types in the project. You can add more by editing guidance_tool and file and adding corresponding parsers in your quest side unity project.
+
+<img width="800" height="450" alt="ezgif-6ed3a199200c4c09" src="https://github.com/user-attachments/assets/3940bda0-3b73-4153-be94-8bf0f7ee8f11" />
+
 
 ---
 
